@@ -341,7 +341,10 @@ private fun SidebarEmbed(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            listOf("文件", "文件变动", "任务管理").forEach { name ->
+            // 终端 and 侧边对话 are offered here as well: the plugin owns those panes, and
+            // opening them from a native chip is more reliable than hunting for the
+            // tile inside the cropped view.
+            listOf("文件", "文件变动", "任务管理", "侧边对话", "终端").forEach { name ->
                 val selected = activePane == name
                 Text(
                     name,
@@ -514,13 +517,10 @@ private const val SIDEBAR_JS = """
         + '[class*="nArs4W_paneEmptyCards"]>button{width:100%!important;height:auto!important;aspect-ratio:1/1;justify-content:center;align-items:center;';
       try { document.head.appendChild(st); } catch (e) {}
     }
-    // 侧边对话 and 终端 do not work in this cut-down view (the terminal needs a live
-    // PTY and never gets one here), so their tiles are removed rather than left as
-    // dead buttons.
-    document.querySelectorAll('[class*="nArs4W_paneCard"]').forEach(function (c) {
-      var t = (c.textContent || '');
-      if (t.indexOf('侧边对话') >= 0 || t.indexOf('终端') >= 0) c.style.display = 'none';
-    });
+    // 侧边对话 and 终端 used to be hidden here ("the terminal never gets a PTY in this
+    // cut-down view"). They are offered now: the pane is the plugin's own UI, and
+    // whether its backend is reachable is better answered by trying it than by
+    // removing the entry — a missing pane looked like a missing feature.
     try { if (window.DshPanel && window.DshPanel.ready) window.DshPanel.ready(); } catch (e) {}
   try { if (!window.__dshNoHarvest) harvestChanges(); } catch (e) {}
     return true;
@@ -578,6 +578,23 @@ private const val SIDEBAR_JS = """
           } catch (e) {}
         }, ms);
       });
+      // These two panes open empty and expect an explicit "new" action. The plugin
+      // renders its own control for that, so the entry is opened and then its
+      // 新建 button is pressed — otherwise the pane just shows an empty shell.
+      if (name === '终端' || name === '侧边对话') {
+        setTimeout(function () {
+          try {
+            var scope = document.querySelector('[class*="nArs4W_bottomPanel"]') || document;
+            var btns = [].slice.call(scope.querySelectorAll('button,[role=button],a'));
+            var pattern = /^(新建|新终端|新建终端|新建会话|新建对话|新对话|添加|＋|\+|New|New terminal|New chat)$/i;
+            for (var k = 0; k < btns.length; k++) {
+              var label = (btns[k].textContent || '').trim();
+              var aria = btns[k].getAttribute('aria-label') || '';
+              if (pattern.test(label) || pattern.test(aria)) { btns[k].click(); return; }
+            }
+          } catch (e) {}
+        }, 1400);
+      }
     }
     return clicked;
   };
