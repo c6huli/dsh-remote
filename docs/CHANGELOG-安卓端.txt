@@ -121,10 +121,16 @@ DSH Remote 安卓端版本记录
             55 条 127.0.0.1:3080 请求全 200，但手机上面板空白；隧道代码保留
             在 WEB_PANELS_VIA_LOOPBACK 开关后面，默认关闭。代价：设置→模型
             仍会显示 settings are unavailable（dsh 只对本机回环开放设置能力）。
+1.5.95  改：工具结果卡片按类型上色，配色直接取宿主 Web 端的 design token
+            （--dsw-static-green-500 / --dsh-file-type-violet / blue-500 /
+            deepseek-450 / amber-500 / blue-400 / neutral-bluish-300）：
+            终端=绿、写入/产物=紫、读取检索=蓝、网络=深蓝、任务/智能体=琥珀、
+            图像=浅蓝、其它=中性；出错始终走红（red-600）。折起的工具组取组内
+            占比最高的类型着色，标题图标同色。
 
 
 当前版本
 ----------------------------------------
-1.5.94-ts / versionCode 173
+1.5.95-ts / versionCode 174
 签名 ef071c7a…（自 1.5.3 起未变，可直接覆盖升级）
 下载位置默认 下载/DSHRemote，可在设置里改或改选任意目录

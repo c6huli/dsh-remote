@@ -228,13 +228,18 @@ fun ChatScreen(
                         is ChatRow.Tools -> ToolGroupCard(row.items, running)
                         is ChatRow.Files -> Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                             // Same "产物" heading the old strip used, now over real rows so
-                            // the block reads as the turn's downloadable card.
-                            Text(
-                                Strings.str("deliverables"),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                            )
+                            // the block reads as the turn's downloadable card. Tinted with the
+                            // edit/data hue the Web UI uses for produced files.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(Modifier.size(6.dp).background(ToolKind.Edit.color, CircleShape))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    Strings.str("deliverables"),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
                             Spacer(Modifier.height(2.dp))
                             row.files.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
                             if (row.files.size > MAX_CARD_ROWS) {
@@ -1164,12 +1169,19 @@ private fun ToolGroupCard(steps: List<ChatItem.Tool>, running: Boolean) {
     var expanded by remember(steps.size) { mutableStateOf(true) }
     // Auto-collapse when the turn finishes, without fighting a manual expand.
     LaunchedEffect(running) { if (!running) expanded = false }
+    // The folded group takes the colour of whatever it mostly did, so a shell-heavy
+    // turn and an edit-heavy turn are distinguishable at a glance.
+    val dominant = remember(steps.size, steps.firstOrNull()?.seq) {
+        steps.groupingBy { toolKindOf(it.name) }.eachCount().maxByOrNull { it.value }?.key ?: ToolKind.Other
+    }
+    val hasError = steps.any { it.isError }
+    val accent = if (hasError) ToolErrorColor else dominant.color
 
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f), RoundedCornerShape(8.dp)),
+            .background(accent.copy(alpha = 0.10f), RoundedCornerShape(8.dp)),
     ) {
         Row(
             Modifier
@@ -1179,9 +1191,9 @@ private fun ToolGroupCard(steps: List<ChatItem.Tool>, running: Boolean) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (running) {
-                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = accent)
             } else {
-                DshIcon(DshIcons.Check, tint = MaterialTheme.colorScheme.secondary, size = 14.dp, contentDescription = null)
+                DshIcon(DshIcons.Check, tint = accent, size = 14.dp, contentDescription = null)
             }
             Spacer(Modifier.width(8.dp))
             Text(
@@ -1297,6 +1309,9 @@ private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
     val summary = item.summary ?: item.arguments.lineSequence().firstOrNull { it.isNotBlank() }?.take(80) ?: ""
     val icon = toolIcon(item.card, item.name)
     val files = remember(item.seq, item.card) { parseFileLinks(item.card, item.arguments) }
+    // Colour by what the tool does, using the host Web UI's own palette; errors keep
+    // the red so a failure never hides behind a category colour.
+    val kind = remember(item.name) { toolKindOf(item.name) }
 
     Column(
         Modifier
@@ -1305,9 +1320,8 @@ private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
             .clickable { expanded = !expanded }
             .background(
                 when {
-                    isError -> DshRed.copy(alpha = 0.12f)
-                    item.isResult -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                    else -> DshAmber.copy(alpha = 0.12f)
+                    isError -> ToolErrorColor.copy(alpha = 0.12f)
+                    else -> kind.tint.copy(alpha = if (item.isResult) 0.12f else 0.18f)
                 },
                 RoundedCornerShape(6.dp),
             )
@@ -1354,15 +1368,11 @@ private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
                 Box(
                     Modifier
                         .size(8.dp)
-                        .background(DshRed, CircleShape),
+                        .background(ToolErrorColor, CircleShape),
                 )
                 Spacer(Modifier.width(6.dp))
             }
-            val nameColor = when {
-                isError -> DshRed
-                item.isResult -> DshGreen
-                else -> DshAmber
-            }
+            val nameColor = if (isError) ToolErrorColor else kind.color
             Row(verticalAlignment = Alignment.CenterVertically) {
                 DshIcon(icon, tint = nameColor, size = 14.dp)
                 Spacer(Modifier.width(4.dp))
