@@ -614,8 +614,25 @@ private const val SIDEBAR_JS = """
     } catch (e) {}
   }
 
+  /**
+   * The host shows first-run notices as modals ("预览版说明", "发现新版本"…). They sit
+   * above the workbench, so the crop looked empty until someone tapped 继续.
+   */
+  function dismissBlocker() {
+    var dialogs = [].slice.call(document.querySelectorAll('[role=dialog]'));
+    for (var i = 0; i < dialogs.length; i++) {
+      var btns = [].slice.call(dialogs[i].querySelectorAll('button,[role=button]'));
+      for (var j = 0; j < btns.length; j++) {
+        var label = (btns[j].textContent || '').trim();
+        if (/^(继续|知道了|确定|关闭|好的?|我知道了)$/.test(label)) { btns[j].click(); return true; }
+      }
+    }
+    return false;
+  }
+
   var tries = 0;
   var t = setInterval(function () {
+    dismissBlocker();
     if (isolate() || ++tries > 200) clearInterval(t);
   }, 250);
   try {

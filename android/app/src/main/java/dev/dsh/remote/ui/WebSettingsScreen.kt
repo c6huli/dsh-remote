@@ -686,16 +686,49 @@ private fun PickerChip(value: String, options: List<String>?, onClick: (String) 
  */
 private const val OPEN_SETTINGS_JS = """
 (function () {
-  function open() {
-    var b = document.querySelector('button[aria-label="设置"]');
-    if (b) { b.click(); return true; }
+  // The host shows first-run notices as modals ("预览版说明", "发现新版本"…). They sit
+  // above everything, so without dismissing them every panel open stopped on a
+  // 继续 button instead of reaching the settings surface.
+  function byLabel(root, pattern) {
+    var btns = [].slice.call((root || document).querySelectorAll('button,[role=button]'));
+    for (var i = 0; i < btns.length; i++) {
+      var t = (btns[i].textContent || '').trim();
+      if (pattern.test(t)) return btns[i];
+    }
+    return null;
+  }
+  function settingsOpen() {
+    var dialogs = [].slice.call(document.querySelectorAll('[role=dialog]'));
+    for (var i = 0; i < dialogs.length; i++) {
+      if ((dialogs[i].textContent || '').indexOf('通用设置') >= 0) return true;
+    }
     return false;
   }
-  if (open()) return;
-  var tries = 0;
-  var t = setInterval(function () {
-    if (open() || ++tries > 60) { clearInterval(t); }
+  function dismissBlocker() {
+    if (settingsOpen()) return false;
+    var dialogs = [].slice.call(document.querySelectorAll('[role=dialog]'));
+    for (var i = 0; i < dialogs.length; i++) {
+      var btn = byLabel(dialogs[i], /^(继续|知道了|确定|关闭|好的?|我知道了)$/);
+      if (btn) { btn.click(); return true; }
+    }
+    return false;
+  }
+  function openSettings() {
+    if (settingsOpen()) return true;
+    var rail = document.querySelector('button[aria-label="设置"]');
+    if (rail) { rail.click(); return true; }
+    return false;
+  }
+  var rounds = 0;
+  var timer = setInterval(function () {
+    rounds += 1;
+    dismissBlocker();
+    openSettings();
+    if (settingsOpen() && rounds > 6) clearInterval(timer);
+    if (rounds > 80) clearInterval(timer);
   }, 250);
+  dismissBlocker();
+  openSettings();
 })();
 """
 
