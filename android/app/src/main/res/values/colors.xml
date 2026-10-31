@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Window background shown from launch until Compose draws its first frame.
+      A pure black window reads as "the app hung"; matching the surface colours
+      makes the wait look like the app is already there.
+    -->
+    <color name="dsh_window_bg">#FFFFFFFF</color>
+</resources>

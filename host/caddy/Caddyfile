@@ -1,0 +1,89 @@
+# dsh-remote HTTPS 反向代理
+# 站点 1：Tailscale 域名（手机走 Tailscale 远程连接）
+# 站点 2：localhost / 127.0.0.1（USB + adb reverse 隧道 / 本机验证）
+#
+# dsh 0.2.x 的 /api 有双重关卡：
+#   1) Host/Origin 信任闸门：Host 必须是回环地址，否则 403
+#   2) browser-session cookie：否则 401
+# 这里把 Host 重写成回环地址，并注入用持久密钥签好的 cookie，
+# 从而让 dsh 0.1.x 时代的客户端（DshRemote App / 任意外部浏览器）通过。
+# cookie 由 refresh-cookie.js 定期重签（dsh 允许的最长有效期是 30 天）。
+{
+  servers {
+    protocols h1 h2
+  }
+  auto_https disable_redirects
+}
+
+(dshproxy) {
+  # 旧协议客户端（DshRemote APK，OkHttp）→ 协议适配层，把 0.1.x 的
+  # /api/session.list + /api/events.mux 翻译成 0.2.x 的 Remote/typert 协议。
+  @legacyApp header User-Agent *okhttp*
+  handle @legacyApp {
+    reverse_proxy 127.0.0.1:3084
+  }
+
+  # 浏览器 / 其他客户端 → 原生 0.2.x（注入签名 cookie，改写 Host）
+  handle {
+    # /assets/* 的文件名自带内容 hash，内容永不变化 → 让客户端长期缓存。
+    # 否则 WebView 每次打开都要重新下载 ~474KB 的前端包，感觉非常慢。
+    @assets path /assets/*
+    header @assets Cache-Control "public, max-age=31536000, immutable"
+    # index.html 必须每次校验，才能拿到新版本的资源引用。
+    @index path /
+    header @index Cache-Control "no-cache"
+
+    reverse_proxy localhost:3080 {
+      header_up Host 127.0.0.1:3080
+      header_up -Origin
+      header_up -Sec-Fetch-Site
+      header_up Cookie "dsh-auth-REPLACE_WITH_YOUR_SESSION_COOKIE"
+    }
+  }
+}
+
+https://YOUR-HOST.tailnet.ts.net:8443 {
+  tls internal
+
+  # 手机浏览器直接下载 APK
+  handle_path /apk/* {
+    root * C:/Users/YM/dsh-remote-deploy/apk
+    file_server
+  }
+
+  import dshproxy
+}
+
+# 纯 HTTP 入口，走 Tailscale（WireGuard 已加密，无需 TLS，浏览器不会有证书警告）
+# 手机浏览器打开 http://100.117.219.91:8080/ 或 http://YOUR-HOST.tailnet.ts.net:8080/
+http://:8080 {
+  handle_path /apk/* {
+    root * C:/Users/YM/dsh-remote-deploy/apk
+    file_server
+  }
+
+  # 远程渲染：服务端用无头 Edge 渲染 Web 界面，只把 JPEG 帧和点击回传给手机。
+  handle /remote-view/* {
+    reverse_proxy 127.0.0.1:3085
+  }
+
+  # 轻量设置页：约 15KB 的静态页面，直接读写 settings 接口，
+  # 不必让手机加载整个 Web 前端包（~474KB）。
+  handle_path /mini/* {
+    root * C:/Users/YM/dsh-remote-deploy/mini
+    file_server
+  }
+
+  import dshproxy
+}
+
+https://localhost:8443, https://127.0.0.1:8443 {
+  tls internal
+
+  handle_path /apk/* {
+    root * C:/Users/YM/dsh-remote-deploy/apk
+    file_server
+  }
+
+  import dshproxy
+}

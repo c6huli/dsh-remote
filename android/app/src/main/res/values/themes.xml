@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DshRemote" parent="android:Theme.Material.NoActionBar">
+        <!-- Never pure black: it reads as a hung app while Compose warms up. -->
+        <item name="android:windowBackground">@color/dsh_window_bg</item>
+    </style>
+</resources>

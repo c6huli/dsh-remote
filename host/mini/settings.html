@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>设置</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb;
+    --card: #f6f7f9; --chip: #eef0f3; --accent: #2563eb; --ok: #16a34a; --err: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111214; --fg:#ecedef; --muted:#9aa0a6; --line:#2a2c30;
+            --card:#1b1d21; --chip:#26282d; --accent:#5b9dff; --ok:#4ade80; --err:#f87171; }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.45 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+         padding-bottom:32px; }
+  header { position:sticky; top:0; z-index:10; background:var(--bg);
+           border-bottom:1px solid var(--line); padding:10px 12px 8px; }
+  .title { display:flex; align-items:center; gap:8px; font-weight:600; font-size:17px; }
+  .state { margin-left:auto; font-size:12px; color:var(--muted); }
+  .state.ok { color:var(--ok); } .state.err { color:var(--err); }
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding:8px 0 2px; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex:none; padding:6px 13px; border-radius:14px; background:var(--chip);
+         color:var(--muted); font-size:13px; border:0; }
+  .tab.on { background:var(--accent); color:#fff; }
+  .group { padding:4px 0 0; }
+  .group h2 { font-size:12px; font-weight:600; color:var(--muted);
+              margin:16px 14px 6px; text-transform:none; letter-spacing:.02em; }
+  .row { display:flex; align-items:center; gap:10px; padding:11px 14px;
+         border-bottom:1px solid var(--line); }
+  .row .txt { flex:1; min-width:0; }
+  .row .label { font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .desc { font-size:12px; color:var(--muted); margin-top:1px;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ctl { flex:none; }
+  select, input[type=text], input[type=number] {
+    background:var(--chip); color:var(--fg); border:0; border-radius:8px;
+    padding:7px 10px; font-size:14px; max-width:52vw;
+  }
+  select { appearance:none; padding-right:26px; }
+  .switch { width:46px; height:27px; border-radius:14px; background:var(--chip);
+            position:relative; border:0; transition:background .15s; }
+  .switch::after { content:""; position:absolute; top:3px; left:3px; width:21px; height:21px;
+                   border-radius:50%; background:#fff; transition:left .15s;
+                   box-shadow:0 1px 3px rgba(0,0,0,.3); }
+  .switch.on { background:var(--ok); } .switch.on::after { left:22px; }
+  .empty { color:var(--muted); font-size:13px; padding:24px 14px; }
+  .toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+           background:var(--card); border:1px solid var(--line); color:var(--fg);
+           padding:9px 16px; border-radius:20px; font-size:13px; opacity:0;
+           transition:opacity .2s; pointer-events:none; max-width:86vw; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <span>设置</span>
+    <span id="state" class="state">加载中…</span>
+  </div>
+  <div class="tabs" id="tabs"></div>
+</header>
+<div id="list"></div>
+<div id="toast" class="toast"></div>
+
+<script>
+// The dsh host answers Remote RPCs on /api/<ns>/<method> with
+// {type,rpcId,method,payload:{args}} — the same wire shape the desktop UI uses.
+const rpcId = () => (crypto.randomUUID ? crypto.randomUUID()
+  : 'r-' + Math.random().toString(36).slice(2));
+
+async function rpc(method, args) {
+  const res = await fetch('/api/' + method, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: rpcId(),
+      method,
+      payload: { args: args === undefined ? {} : args }
+    })
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const j = await res.json();
+  if (!j.result || j.result.ok !== true) {
+    const e = (j.result && j.result.error) || {};
+    throw new Error(e.message || e.code || 'RPC 失败');
+  }
+  return j.result.value;
+}
+
+const stateEl = document.getElementById('state');
+const listEl = document.getElementById('list');
+const tabsEl = document.getElementById('tabs');
+const toastEl = document.getElementById('toast');
+
+let DATA = null;
+let currentTab = '通用';
+
+function toast(msg, bad) {
+  toastEl.textContent = msg;
+  toastEl.style.borderColor = bad ? 'var(--err)' : 'var(--line)';
+  toastEl.style.color = bad ? 'var(--err)' : 'var(--fg)';
+  toastEl.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+function setState(text, cls) {
+  stateEl.textContent = text;
+  stateEl.className = 'state ' + (cls || '');
+}
+
+// ---- curated presentation, mirroring the desktop Settings sidebar ----
+const CURATED = [
+  { tab: '通用', ns: 'permission', key: 'defaultPreset', label: '权限',
+    desc: '选择新会话的默认权限模式',
+    options: ['danger-full-access', 'ask', 'never'] },
+  { tab: '通用', ns: 'ui-chat', key: 'performanceUsage', label: '工作步骤展示',
+    desc: '选择希望看到多少工具调用细节', options: ['detailed', 'compact', 'off'] },
+  { tab: '通用', ns: 'ui-conversation', key: 'busyEnter', label: '繁忙时的发送行为',
+    desc: '智能体运行时 Enter 键和发送按钮的行为', options: ['queue', 'steer', 'interrupt'] },
+  { tab: '通用', ns: 'ui-chat', key: 'linkOpening', label: '链接打开方式',
+    desc: '点击对话中的链接时如何打开', options: ['sidebar', 'browser'] },
+  { tab: '通用', ns: 'session-log-deepseek', key: 'enabled', label: '记录会话日志',
+    desc: '开启后会把会话轨迹写入本地日志', bool: true },
+  { tab: '模型', ns: 'agent-default-model', key: 'provider', label: '默认提供方',
+    desc: '新会话使用的模型提供方' },
+  { tab: '模型', ns: 'agent-default-model', key: 'model', label: '默认模型',
+    desc: '新会话使用的模型' },
+  { tab: '模型', ns: 'agent-default-model', key: 'reasoningEffort', label: '推理强度',
+    desc: '思考深度，越高越慢但更充分',
+    options: ['off', 'minimal', 'low', 'medium', 'high'] },
+  { tab: '外观', ns: 'ui-theme', key: 'preference', label: '外观',
+    desc: 'Web 界面的明暗模式', options: ['light', 'dark', 'system'] },
+  { tab: '外观', ns: 'ui-theme', key: 'fontSize', label: '字号大小',
+    desc: '仅影响会话内容的字号' }
+];
+
+const TITLES = {
+  'better-sidebar': '侧边卡片', 'dsh-ops-shell': 'shell 工具', 'dsh-ops-file': '文件工具',
+  'dsh-ops-ptc': 'PTC 工具', 'dsh-ops-discovery': '工具发现', 'dsh-market': '插件市场',
+  'plugin-manager': '插件安装', 'agent-preset-registry': 'Agent 预设', subagent: '子代理',
+  'web-search-deepseek': '网页搜索', 'pwsh-sandbox': 'pwsh 沙箱', 'agent-loop': '智能体循环',
+  subagent2: '子代理模型', locale: '语言与地区', 'ui-settings-general': '界面通用',
+  'channel-pack': '渠道', opencode2dsh: '模型探测'
+};
+
+const findNs = (ns) => (DATA ? DATA.namespaces.find(n => n.ns === ns) : null);
+const getVal = (ns, key) => {
+  const n = findNs(ns); if (!n) return null;
+  const v = n.value && n.value[key];
+  if (v === undefined || v === null) return null;
+  return typeof v === 'string' ? v : String(v);
+};
+
+function rowEl(label, desc, ctl) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const txt = document.createElement('div');
+  txt.className = 'txt';
+  const l = document.createElement('div'); l.className = 'label'; l.textContent = label;
+  txt.appendChild(l);
+  if (desc) { const d = document.createElement('div'); d.className = 'desc'; d.textContent = desc; txt.appendChild(d); }
+  row.appendChild(txt);
+  const c = document.createElement('div'); c.className = 'ctl'; c.appendChild(ctl);
+  row.appendChild(c);
+  return row;
+}
+
+async function save(ns, key, oldVal, newVal) {
+  const n = findNs(ns); if (!n) return;
+  // Keep the host's JSON type: numbers stay numbers, booleans stay booleans.
+  let v = newVal;
+  if (typeof oldVal === 'number' || (oldVal !== null && /^-?\d+(\.\d+)?$/.test(String(oldVal)) && typeof oldVal !== 'string')) {
+    const num = Number(newVal); if (!Number.isNaN(num)) v = num;
+  } else if (typeof oldVal === 'boolean') {
+    v = newVal === true || newVal === 'true';
+  }
+  try {
+    await rpc('settings/update', {
+      ns, patch: { [key]: v }, expectedRevision: n.revision || 0
+    });
+    if (n.value) n.value[key] = v;
+    toast('已保存 ' + key);
+  } catch (e) {
+    toast('保存失败：' + e.message, true);
+  }
+}
+
+function control(spec) {
+  const cur = getVal(spec.ns, spec.key);
+  if (spec.bool) {
+    const b = document.createElement('button');
+    b.className = 'switch' + (cur === 'true' ? ' on' : '');
+    b.addEventListener('click', () => {
+      const next = !b.classList.contains('on');
+      b.classList.toggle('on', next);
+      save(spec.ns, spec.key, false, next);
+    });
+    return b;
+  }
+  if (spec.options) {
+    const sel = document.createElement('select');
+    for (const o of spec.options) {
+      const opt = document.createElement('option');
+      opt.value = o; opt.textContent = o;
+      if (o === cur) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => save(spec.ns, spec.key, cur, sel.value));
+    return sel;
+  }
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.value = cur === null ? '' : cur;
+  inp.addEventListener('change', () => save(spec.ns, spec.key, cur, inp.value));
+  return inp;
+}
+
+function render() {
+  if (!DATA) return;
+  const tabs = ['通用', '模型', '外观', '更多'];
+  tabsEl.innerHTML = '';
+  for (const t of tabs) {
+    const b = document.createElement('button');
+    b.className = 'tab' + (t === currentTab ? ' on' : '');
+    b.textContent = t;
+    b.addEventListener('click', () => { currentTab = t; render(); });
+    tabsEl.appendChild(b);
+  }
+
+  listEl.innerHTML = '';
+  if (currentTab !== '更多') {
+    const wrap = document.createElement('div');
+    wrap.className = 'group';
+    const specs = CURATED.filter(s => s.tab === currentTab && findNs(s.ns));
+    if (!specs.length) {
+      wrap.innerHTML = '<div class="empty">该分组暂无可编辑项</div>';
+    } else {
+      for (const s of specs) wrap.appendChild(rowEl(s.label, s.desc, control(s)));
+    }
+    listEl.appendChild(wrap);
+    return;
+  }
+
+  // 更多: every namespace not already curated, each field editable.
+  const curatedKeys = new Set(CURATED.map(s => s.ns + '.' + s.key));
+  const wrap = document.createElement('div');
+  wrap.className = 'group';
+  let shown = 0;
+  for (const n of DATA.namespaces) {
+    const fields = Object.entries(n.value || {}).filter(([k, v]) => {
+      const simple = v === null || ['string', 'number', 'boolean'].includes(typeof v);
+      return simple && !curatedKeys.has(n.ns + '.' + k);
+    });
+    if (!fields.length) continue;
+    const h = document.createElement('h2');
+    h.textContent = TITLES[n.ns] || n.ns;
+    wrap.appendChild(h);
+    for (const [k, v] of fields) {
+      const spec = { ns: n.ns, key: k };
+      if (typeof v === 'boolean') spec.bool = true;
+      wrap.appendChild(rowEl(k, n.ns, control(spec)));
+      shown++;
+    }
+  }
+  if (!shown) wrap.innerHTML = '<div class="empty">没有额外可编辑项</div>';
+  listEl.appendChild(wrap);
+}
+
+async function load() {
+  setState('加载中…', '');
+  try {
+    const v = await rpc('settings/describe');
+    DATA = { writable: v.writable, namespaces: v.namespaces || [] };
+    setState('已连接 · ' + DATA.namespaces.length + ' 项', 'ok');
+    render();
+  } catch (e) {
+    setState('加载失败：' + e.message, 'err');
+    listEl.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>';
+  }
+}
+
+load();
+// Re-read when the tab regains focus so external changes show up.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && DATA) load();
+});
+</script>
+</body>
+</html>
