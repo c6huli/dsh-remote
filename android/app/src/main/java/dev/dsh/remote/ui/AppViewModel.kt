@@ -1036,6 +1036,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Local proxy that serves the Web bundle from phone storage. */
     private var webProxy: dev.dsh.remote.net.WebProxyServer? = null
+    /** Loopback TCP tunnel that gives the Web panels a local-looking origin. */
+    private var loopbackTunnel: dev.dsh.remote.net.LoopbackTunnel? = null
+
+    /**
+     * URL the embedded Web panels (设置 / 侧边栏) should load.
+     *
+     * dsh's web client decides whether it is on the local authority from
+     * `location.hostname` alone, and withholds the settings surfaces when it is
+     * not loopback ("settings are unavailable in this browser"). Loading the host
+     * over the tailnet therefore yields a panel that renders but cannot open
+     * 设置 → 模型, so the page is served through a loopback TCP tunnel instead.
+     * A tunnel was chosen over the old in-app HTTP proxy because it also carries
+     * the WebSocket upgrade, which the proxy hung on.
+     *
+     * Falls back to the host URL whenever the tunnel cannot start, and returns
+     * the host URL unchanged when it is already loopback (adb reverse).
+     */
+    fun webEntryUrl(): String {
+        val base = (activeBaseUrl.value ?: serverUrl.value).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
+        return try {
+            val uri = java.net.URI(base)
+            val host = uri.host ?: return "$base/"
+            val port = if (uri.port > 0) uri.port else 80
+            if (isLoopbackHost(host)) return "$base/"
+            loopbackTunnel?.let { if (it.port > 0) return "http://127.0.0.1:${it.port}/" }
+            val tunnel = dev.dsh.remote.net.LoopbackTunnel(host, port)
+            val bound = tunnel.start()
+            loopbackTunnel = tunnel
+            log("web tunnel 127.0.0.1:$bound -> $host:$port")
+            "http://127.0.0.1:$bound/"
+        } catch (e: Throwable) {
+            log("web tunnel failed: ${e.message}; loading the host directly")
+            "$base/"
+        }
+    }
+
+    private fun isLoopbackHost(host: String): Boolean =
+        host == "localhost" || host == "::1" || host == "[::1]" ||
+            (host.startsWith("127.") && host.split('.').let { p -> p.size == 4 && p.all { it.toIntOrNull() != null } })
+
     /** Start (once) the local Web proxy and return its port. */
     fun ensureWebProxy(): Int? {
         val base = baseUrl ?: return null

@@ -314,11 +314,11 @@ fun WebSettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDrawer: () -> 
                     )
                 }
             } else {
-                val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
-                // Straight to the host: a localhost proxy hop only added a failure
-                // mode (it could stall for the whole 60 s load budget).
+                // Through the loopback tunnel: dsh only offers its settings
+                // surfaces when location.hostname looks local. Falls back to the
+                // host URL if the tunnel cannot start.
                 WebChromePanel(
-                    url = "$base/",
+                    url = vm.webEntryUrl(),
                     injectSettings = true,
                     onOpenDrawer = onOpenDrawer,
                     // Back from the host's settings page leaves settings entirely:

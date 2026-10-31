@@ -109,10 +109,14 @@ DSH Remote 安卓端版本记录
 1.5.91  修：设置面板不再经本地代理（127.0.0.1:3086）—— 那个 localhost 中转会把
             正常的主机变成「加载超时（60 秒）」，而聊天（OkHttp 长连接）却照常。
             改为 WebView 直连主机 + 用注入 JS 做面板裁剪；插件探测同上。
+1.5.92  修：设置 → 模型 报「settings are unavailable in this browser」。dsh 的 Web
+            客户端只按 location.hostname 判断是否本机，非回环就关掉设置能力；
+            新增 127.0.0.1 TCP 隧道（LoopbackTunnel），两个面板都从回环地址加载，
+            顺带解决 1.5.91 直连导致的能力缺失 —— 隧道是裸 TCP，WebSocket 也能过。
 
 
 当前版本
 ----------------------------------------
-1.5.91-ts / versionCode 170
+1.5.92-ts / versionCode 171
 签名 ef071c7a…（自 1.5.3 起未变，可直接覆盖升级）
 下载位置默认 下载/DSHRemote，可在设置里改或改选任意目录

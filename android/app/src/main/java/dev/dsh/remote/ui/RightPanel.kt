@@ -211,6 +211,9 @@ fun IsolatedPane(vm: AppViewModel, pane: String, modifier: Modifier = Modifier) 
     val serverUrl by vm.serverUrl.collectAsState()
     val activeBaseUrl by vm.activeBaseUrl.collectAsState()
     val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
+    // Loopback tunnel so dsh treats this panel as the local authority; memoised
+    // because binding the listener is side-effecting.
+    val entryUrl = remember(activeBaseUrl, serverUrl) { vm.webEntryUrl() }
 
     if (missing || installed == false) {
         androidx.compose.foundation.layout.Box(modifier.padding(8.dp)) { PluginMissingBlock(compact = true) }
@@ -252,7 +255,7 @@ fun IsolatedPane(vm: AppViewModel, pane: String, modifier: Modifier = Modifier) 
                             } catch (_: Throwable) {}
                         }
                     }
-                    try { loadUrl("$base/") } catch (_: Throwable) {}
+                    try { loadUrl(entryUrl) } catch (_: Throwable) {}
                 }
             } catch (e: Throwable) {
                 android.widget.TextView(ctx).apply {
@@ -310,6 +313,9 @@ private fun SidebarEmbed(
     val serverUrl by vm.serverUrl.collectAsState()
     val activeBaseUrl by vm.activeBaseUrl.collectAsState()
     val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
+    // Loopback tunnel so dsh treats this panel as the local authority; memoised
+    // because binding the listener is side-effecting.
+    val entryUrl = remember(activeBaseUrl, serverUrl) { vm.webEntryUrl() }
     var ready by remember { mutableStateOf(false) }
     var missing by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
@@ -406,7 +412,7 @@ private fun SidebarEmbed(
                             }
                             isFocusable = true
                             isClickable = true
-                            try { loadUrl("$base/") } catch (_: Throwable) {}
+                            try { loadUrl(entryUrl) } catch (_: Throwable) {}
                             webView = this
                         }
                     } catch (e: Throwable) {
@@ -447,7 +453,7 @@ private fun SidebarEmbed(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "$base/",
+                        entryUrl,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
