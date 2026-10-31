@@ -1040,21 +1040,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var loopbackTunnel: dev.dsh.remote.net.LoopbackTunnel? = null
 
     /**
+     * Whether the Web panels are loaded through the loopback tunnel.
+     *
+     * OFF: on-device the tunnel answered every request (the host access log shows
+     * 55 requests with `host: 127.0.0.1:3080`, all 200) yet both panels came up
+     * blank, while loading the host straight from its own URL renders them in a
+     * couple of seconds. The direct arrangement is therefore the default again.
+     *
+     * The tunnel stays in the tree, unused, because its one benefit is real:
+     * dsh's web client only offers the settings surfaces when
+     * `location.hostname` is loopback, so the settings → 模型 page needs a
+     * local-looking origin. Flip this flag once that can be debugged on-device.
+     */
+    private val WEB_PANELS_VIA_LOOPBACK = false
+
+    /**
      * URL the embedded Web panels (设置 / 侧边栏) should load.
      *
-     * dsh's web client decides whether it is on the local authority from
-     * `location.hostname` alone, and withholds the settings surfaces when it is
-     * not loopback ("settings are unavailable in this browser"). Loading the host
-     * over the tailnet therefore yields a panel that renders but cannot open
-     * 设置 → 模型, so the page is served through a loopback TCP tunnel instead.
-     * A tunnel was chosen over the old in-app HTTP proxy because it also carries
-     * the WebSocket upgrade, which the proxy hung on.
-     *
-     * Falls back to the host URL whenever the tunnel cannot start, and returns
-     * the host URL unchanged when it is already loopback (adb reverse).
+     * Default: the host URL itself, which renders both panels here in seconds.
+     * With [WEB_PANELS_VIA_LOOPBACK] the page is served from 127.0.0.1 through a
+     * raw TCP tunnel, which would also unlock 设置 → 模型.
      */
     fun webEntryUrl(): String {
         val base = (activeBaseUrl.value ?: serverUrl.value).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
+        if (!WEB_PANELS_VIA_LOOPBACK) return "$base/"
         return try {
             val uri = java.net.URI(base)
             val host = uri.host ?: return "$base/"
