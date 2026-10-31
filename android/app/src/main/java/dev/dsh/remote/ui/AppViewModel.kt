@@ -1141,10 +1141,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 startForegroundService()
                 collectFrames(url2, client)
                 startWatchdog()
-                // Warm the settings/sidebar bundle once, well after the first screen
-                // is up: those two panels otherwise pull ~1.5 MB the first time they
-                // are opened, which on a relayed link reads as "cannot connect".
-                warmWebCacheOnce()
                 // Refresh the DeepSeek balance if a key is already saved.
                 if (settings.deepseekApiKey.first().isNotBlank()) {
                     queryDeepseekBalance()
@@ -1158,32 +1154,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Set once the bundle warm-up has been attempted in this process. */
-    private var webCacheWarmStarted = false
-
-    /**
-     * Download the Web bundle into the local proxy's cache, once per process.
-     *
-     * The settings and sidebar panels are WebViews over the host's own page, so
-     * without this the first open of either one is a fresh multi-hundred-KB pull.
-     * Delayed so it never competes with the conversation's first turn.
-     */
-    private fun warmWebCacheOnce() {
-        if (webCacheWarmStarted) return
-        webCacheWarmStarted = true
-        viewModelScope.launch {
-            delay(20_000L)
-            try {
-                val port = ensureWebProxy() ?: return@launch
-                val cache = java.io.File(getApplication<Application>().filesDir, "webcache")
-                val assets = java.io.File(cache, "assets")
-                if (assets.isDirectory && assets.listFiles()?.isNotEmpty() == true) return@launch
-                val n = withContext(Dispatchers.IO) { precacheWeb() }
-                log("web bundle cached: $n files (proxy $port)")
-            } catch (_: Throwable) {
-            }
-        }
-    }
     /**
      * Return the first base URL that answers.
      *

@@ -189,6 +189,16 @@ class WebProxyServer(
         }
 
         /**
+         * [PANEL_JS] without its `<script>` wrapper, for `evaluateJavascript`.
+         *
+         * The settings panel loads the host page directly now (the local proxy
+         * made that URL a localhost hop that could hang for a minute), so the
+         * phone-fit transform is applied from the native side instead.
+         */
+        val PANEL_FIT_JS: String
+            get() = PANEL_JS.trim().removePrefix("<script>").removeSuffix("</script>")
+
+        /**
          * Only content-addressed bundle files are safe to cache: index.html carries
          * the per-session boot payload, so it must always come from the host.
          */
