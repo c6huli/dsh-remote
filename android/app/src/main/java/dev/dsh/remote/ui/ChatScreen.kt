@@ -226,8 +226,24 @@ fun ChatScreen(
                 items(rows) { row ->
                     when (row) {
                         is ChatRow.Tools -> ToolGroupCard(row.items, running)
-                        is ChatRow.Files -> Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                            row.files.forEach { f -> FileLinkRow(f) }
+                        is ChatRow.Files -> Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            // Same "产物" heading the old strip used, now over real rows so
+                            // the block reads as the turn's downloadable card.
+                            Text(
+                                Strings.str("deliverables"),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            row.files.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
+                            if (row.files.size > MAX_CARD_ROWS) {
+                                Text(
+                                    Strings.str("more_files", row.files.size - MAX_CARD_ROWS),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
                         }
                         is ChatRow.Single -> ChatRow(
                             row.item,
@@ -929,6 +945,9 @@ private sealed interface ChatRow {
     data class Files(val files: List<FileLink>) : ChatRow
 }
 
+/** Rows shown in a turn's file card before collapsing the rest into a `+N` hint. */
+private const val MAX_CARD_ROWS = 8
+
 /**
  * Fold every run of consecutive tool steps into a single row.
  *
@@ -938,37 +957,82 @@ private sealed interface ChatRow {
 private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
     val out = ArrayList<ChatRow>(items.size)
     var buf = ArrayList<ChatItem.Tool>()
-    // Files produced since the last user message: flushed at the end of each turn so
-    // every historical turn keeps its own list.
+    // Files this turn touched: flushed at the end of each turn, so every turn — and
+    // every historical session — gets its own downloadable card. This deliberately
+    // does NOT depend on the agent calling `present`: any file a tool wrote or
+    // edited is listed too, which is what makes the card appear for every session.
     var turnFiles = ArrayList<FileLink>()
-    // A tool call and its result both carry the same files array, and the result can
-    // even land after the turn-end marker — so the guard has to span the whole
-    // conversation. Each path is listed once, at the turn that first produced it.
-    val emitted = HashSet<String>()
+    // A tool call and its result both describe the same file, so dedupe inside the
+    // turn. Across turns a file may legitimately reappear (it changed again), which
+    // is information worth keeping.
+    var turnSeen = HashSet<String>()
     fun flush() {
         if (buf.size == 1) out.add(ChatRow.Single(buf[0])) else if (buf.size > 1) out.add(ChatRow.Tools(buf.toList()))
         buf = ArrayList()
     }
     fun flushFiles() {
-        if (turnFiles.isEmpty()) return
-        val fresh = turnFiles.filter { emitted.add(it.path) }
-        if (fresh.isNotEmpty()) out.add(ChatRow.Files(fresh))
+        if (turnFiles.isNotEmpty()) out.add(ChatRow.Files(turnFiles.toList()))
         turnFiles = ArrayList()
+        turnSeen = HashSet()
     }
     for (item in items) {
         if (item is ChatItem.Tool) {
             buf.add(item)
-            turnFiles.addAll(parseFileLinks(item.card, item.arguments))
+            for (f in filesOfTool(item)) {
+                if (turnSeen.add(f.path)) turnFiles.add(f)
+            }
         } else {
             flush()
             out.add(ChatRow.Single(item))
             // A turn boundary: emit that turn's files right after its last output.
-            if (item is ChatItem.Assistant && item.isTurnEnd) flushFiles()
+            // A user message is a hard boundary too, in case a turn never ended
+            // cleanly (aborted run) — otherwise its files would leak into the next.
+            if ((item is ChatItem.Assistant && item.isTurnEnd) || item is ChatItem.User) flushFiles()
         }
     }
     flush()
     flushFiles()
     return out
+}
+
+/** Tools whose arguments name the file they write, even without a `files` array. */
+private val FILE_WRITING_TOOLS = setOf(
+    "write", "edit", "multi_edit", "apply_patch", "create_file", "replace_in_file",
+    "str_replace", "notebook_edit", "present",
+)
+
+/**
+ * Every file one tool touched, as download rows.
+ *
+ * Three sources, so a card exists whether or not the agent called `present`:
+ *  - a `files` array (the `present` tool, and dsh's own deliverable cards)
+ *  - a diff card's path
+ *  - the `path` / `file_path` argument of a writing tool
+ */
+private fun filesOfTool(t: ChatItem.Tool): List<FileLink> {
+    val links = ArrayList<FileLink>(2)
+    links.addAll(parseFileLinks(t.card, t.arguments))
+    t.diffPath?.takeIf { it.isNotBlank() }?.let { links.add(FileLink(it, labelOf(it))) }
+    if (t.name.lowercase() in FILE_WRITING_TOOLS) {
+        pathOfToolArguments(t.arguments)?.let { links.add(FileLink(it, labelOf(it))) }
+    }
+    return links
+}
+
+private fun labelOf(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
+
+/** Pull `path` / `file_path` out of a tool-call arguments JSON object. */
+private fun pathOfToolArguments(arguments: String?): String? {
+    val body = arguments?.takeIf { it.isNotBlank() } ?: return null
+    return try {
+        val obj = kotlinx.serialization.json.Json.parseToJsonElement(body) as? kotlinx.serialization.json.JsonObject
+            ?: return null
+        listOf("path", "file_path", "filePath", "filename", "file").firstNotNullOfOrNull { key ->
+            (obj[key] as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+        }
+    } catch (_: Exception) {
+        null
+    }
 }
 
 /**
