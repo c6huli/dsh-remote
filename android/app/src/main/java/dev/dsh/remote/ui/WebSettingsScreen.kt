@@ -161,6 +161,7 @@ fun WebSettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDrawer: () -> 
     // tabs below are only a fallback when the WebView cannot be used at all.
     var showWebChrome by remember { mutableStateOf(true) }
     var webReady by remember { mutableStateOf(false) }
+    var proxyPort by remember { mutableStateOf<Int?>(null) }
 
     val serverUrl by vm.serverUrl.collectAsState()
     val activeBaseUrl by vm.activeBaseUrl.collectAsState()
@@ -169,10 +170,9 @@ fun WebSettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDrawer: () -> 
         if (showWebChrome) {
             // Theme sync must never block the page: cap it and continue anyway.
             kotlinx.coroutines.withTimeoutOrNull(3_000L) { vm.syncWebTheme() }
-            // Load the host page directly. It used to go through the in-app proxy
-            // on 127.0.0.1 — which turned a working host into "加载超时（60 秒）,
-            // 地址 http://127.0.0.1:3086/" whenever that localhost hop misbehaved.
-            // The panel-only view is now applied by injected JS instead.
+            // The local proxy forwards every request to the host. It exists only so
+            // the page can be adjusted on its way through (settings-panel-only view).
+            proxyPort = vm.ensureWebProxy()
             webReady = true
         } else {
             webReady = false
@@ -313,12 +313,26 @@ fun WebSettingsScreen(vm: AppViewModel, onBack: () -> Unit, onOpenDrawer: () -> 
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            } else if (proxyPort == null) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text("本地代理启动失败", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "请先在设置里重新连接，再进这里重试",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             } else {
-                // Through the loopback tunnel: dsh only offers its settings
-                // surfaces when location.hostname looks local. Falls back to the
-                // host URL if the tunnel cannot start.
+                val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
+                // Prefer the in-app proxy; fall back to the host directly if it failed.
+                val target = proxyPort?.let { "http://127.0.0.1:$it/" } ?: "$base/"
                 WebChromePanel(
-                    url = vm.webEntryUrl(),
+                    url = target,
                     injectSettings = true,
                     onOpenDrawer = onOpenDrawer,
                     // Back from the host's settings page leaves settings entirely:
@@ -786,23 +800,6 @@ private fun WebChromePanel(
                 }
             }
             TextButton(onClick = { webView?.reload() }) { Text("刷新") }
-            // A stale WebView cache renders this panel blank while every request
-            // still answers 200, so give the user a one-tap way out of it.
-            TextButton(onClick = {
-                try { android.webkit.WebStorage.getInstance().deleteAllData() } catch (_: Throwable) {}
-                try {
-                    android.webkit.WebView(context).apply {
-                        clearCache(true)
-                        clearHistory()
-                        clearFormData()
-                        destroy()
-                    }
-                } catch (_: Throwable) {}
-                try {
-                    webView?.clearCache(true)
-                    webView?.reload()
-                } catch (_: Throwable) {}
-            }) { Text("清缓存") }
             // Re-open the settings sheet if the user navigated away from it.
             TextButton(onClick = {
                 try { webView?.evaluateJavascript(OPEN_SETTINGS_JS, null) } catch (_: Throwable) {}
@@ -846,12 +843,6 @@ private fun WebChromePanel(
                             override fun onPageFinished(view: android.webkit.WebView?, u: String?) {
                                 loading = false
                                 progress = 100
-                                // The phone-fit transform used to arrive through the local
-                                // proxy's HTML rewrite. It is applied here now, so this
-                                // panel no longer depends on a localhost hop.
-                                try {
-                                    view?.evaluateJavascript(dev.dsh.remote.net.WebProxyServer.PANEL_FIT_JS, null)
-                                } catch (_: Throwable) {}
                                 if (injectSettings) {
                                     // This panel only shows the settings surface, so open it.
                                     try { view?.evaluateJavascript(OPEN_SETTINGS_JS, null) } catch (_: Throwable) {}

@@ -211,9 +211,6 @@ fun IsolatedPane(vm: AppViewModel, pane: String, modifier: Modifier = Modifier) 
     val serverUrl by vm.serverUrl.collectAsState()
     val activeBaseUrl by vm.activeBaseUrl.collectAsState()
     val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
-    // Loopback tunnel so dsh treats this panel as the local authority; memoised
-    // because binding the listener is side-effecting.
-    val entryUrl = remember(activeBaseUrl, serverUrl) { vm.webEntryUrl() }
 
     if (missing || installed == false) {
         androidx.compose.foundation.layout.Box(modifier.padding(8.dp)) { PluginMissingBlock(compact = true) }
@@ -255,7 +252,7 @@ fun IsolatedPane(vm: AppViewModel, pane: String, modifier: Modifier = Modifier) 
                             } catch (_: Throwable) {}
                         }
                     }
-                    try { loadUrl(entryUrl) } catch (_: Throwable) {}
+                    try { loadUrl("$base/") } catch (_: Throwable) {}
                 }
             } catch (e: Throwable) {
                 android.widget.TextView(ctx).apply {
@@ -313,12 +310,8 @@ private fun SidebarEmbed(
     val serverUrl by vm.serverUrl.collectAsState()
     val activeBaseUrl by vm.activeBaseUrl.collectAsState()
     val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
-    // Loopback tunnel so dsh treats this panel as the local authority; memoised
-    // because binding the listener is side-effecting.
-    val entryUrl = remember(activeBaseUrl, serverUrl) { vm.webEntryUrl() }
     var ready by remember { mutableStateOf(false) }
     var missing by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<String?>(null) }
     var installed by remember { mutableStateOf<Boolean?>(null) }
     var webView by remember { mutableStateOf<android.webkit.WebView?>(null) }
     var activePane by remember { mutableStateOf<String?>(null) }
@@ -393,26 +386,12 @@ private fun SidebarEmbed(
                             try { addJavascriptInterface(PanelReadyBridge({ ready = true }, onChanges, { missing = true }), "DshPanel") } catch (_: Throwable) {}
                             webViewClient = object : android.webkit.WebViewClient() {
                                 override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                                    loadError = null
                                     try { view?.evaluateJavascript(SIDEBAR_JS, null) } catch (_: Throwable) {}
-                                }
-
-                                // A dead host used to leave this pane on a spinner
-                                // forever, which reads as "cannot connect" with no
-                                // way out. Surface it and offer a retry instead.
-                                override fun onReceivedError(
-                                    view: android.webkit.WebView?,
-                                    request: android.webkit.WebResourceRequest?,
-                                    error: android.webkit.WebResourceError?,
-                                ) {
-                                    if (request?.isForMainFrame == true) {
-                                        loadError = "${error?.errorCode}: ${error?.description}"
-                                    }
                                 }
                             }
                             isFocusable = true
                             isClickable = true
-                            try { loadUrl(entryUrl) } catch (_: Throwable) {}
+                            try { loadUrl("$base/") } catch (_: Throwable) {}
                             webView = this
                         }
                     } catch (e: Throwable) {
@@ -433,58 +412,6 @@ private fun SidebarEmbed(
             if (missing) {
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(8.dp)) {
                     PluginMissingBlock(compact = true)
-                }
-            } else if (loadError != null) {
-                Column(
-                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Text(
-                        "侧边栏加载失败",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        loadError ?: "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        entryUrl,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "重试",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable {
-                            loadError = null
-                            ready = false
-                            try { webView?.reload() } catch (_: Throwable) {}
-                        },
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    // A stale WebView cache can keep this pane blank no matter how
-                    // often it reloads; wiping it is the way out.
-                    Text(
-                        "清缓存重载",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable {
-                            loadError = null
-                            ready = false
-                            vm.clearWebViewCache()
-                            try {
-                                webView?.clearCache(true)
-                                webView?.reload()
-                            } catch (_: Throwable) {}
-                        },
-                    )
                 }
             } else if (!ready) {
                 Column(

@@ -882,26 +882,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Ask the host whether the sidebar plugin is present.
      *
-     * Only a *positive* answer is ever cached. A negative one used to be cached
-     * forever, so a single failed probe — the bridge restarting, a reconnect race,
-     * one dead request — left both the workbench and the 文件变动 card showing
-     * "未安装插件" for the rest of the process, with no path back except killing
-     * the app. Unknown or failed probes now return true so the panel loads and the
-     * page itself decides (it reports missing via `DshPanel.missing`).
+     * Checked before the panel WebView is created: waiting for a block that will
+     * never render wastes ten seconds and looks like a broken screen.
      */
     suspend fun hasBetterSidebar(): Boolean = withContext(Dispatchers.IO) {
         betterSidebar?.let { return@withContext it }
-        val dsh = api ?: return@withContext true
-        try {
+        val dsh = api ?: return@withContext false
+        val ok = try {
             val raw = dsh.settingsDescribeRaw()
-            val present = raw["namespaces"]?.jsonArray
+            raw["namespaces"]?.jsonArray
                 ?.mapNotNull { it as? JsonObject }
                 ?.any { it["ns"]?.jsonPrimitive?.contentOrNull == "better-sidebar" } ?: false
-            if (present) betterSidebar = true
-            true // optimistic: let the page report a genuinely absent plugin
         } catch (_: Exception) {
-            true // transient failure: never poison the cache, retry on the next open
+            false
         }
+        betterSidebar = ok
+        ok
     }
     private var lastBalance: Double? = null
     private var muxJob: kotlinx.coroutines.Job? = null
@@ -935,61 +931,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Apply the saved language before any UI composes, then auto-connect.
         viewModelScope.launch { Strings.setLang(settings.language.first()) }
-        // A WebView cache carried over from a previous build renders the settings and
-        // sidebar panels blank while every request still answers 200. Wiping it once
-        // per installed version costs nothing and removes that whole failure class.
-        viewModelScope.launch(Dispatchers.Main) { clearWebViewCacheIfNewVersion() }
         fetchPrices()
         connect()
-    }
-
-    /**
-     * Drop the WebView cache when the installed build changes.
-     *
-     * Both panels are WebViews over the host's own page, and the bundle they load is
-     * cached for a year (`Cache-Control: immutable`). After an upgrade or a host
-     * frontend change that cache can describe a bundle the page no longer matches,
-     * and the result is a blank panel with a clean network log — indistinguishable
-     * from "cannot connect". Clearing once per version keeps the two in step.
-     */
-    private fun clearWebViewCacheIfNewVersion() {
-        try {
-            val ctx = getApplication<Application>()
-            val prefs = ctx.getSharedPreferences("dsh_web_cache", android.content.Context.MODE_PRIVATE)
-            val now = try {
-                ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionCode
-            } catch (_: Throwable) {
-                -1
-            }
-            if (prefs.getInt("version", -1) == now) return
-            clearWebViewCache()
-            prefs.edit().putInt("version", now).apply()
-            log("webview cache cleared for version $now")
-        } catch (e: Throwable) {
-            log("webview cache reset failed: ${e.message}")
-        }
-    }
-
-    /** Wipe the WebView cache and the panel bundle cache. Must run on the main thread. */
-    fun clearWebViewCache() {
-        try {
-            android.webkit.WebStorage.getInstance().deleteAllData()
-        } catch (_: Throwable) {
-        }
-        try {
-            val ctx = getApplication<Application>()
-            android.webkit.WebView(ctx).apply {
-                clearCache(true)
-                clearHistory()
-                clearFormData()
-                destroy()
-            }
-        } catch (_: Throwable) {
-        }
-        try {
-            java.io.File(getApplication<Application>().filesDir, "webcache").deleteRecursively()
-        } catch (_: Throwable) {
-        }
     }
     /** Fetch the latest pricing table from `prices.json`; built-in defaults are kept on failure. */
     private fun fetchPrices() {
@@ -1089,55 +1032,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     /** Local proxy that serves the Web bundle from phone storage. */
     private var webProxy: dev.dsh.remote.net.WebProxyServer? = null
-    /** Loopback TCP tunnel that gives the Web panels a local-looking origin. */
-    private var loopbackTunnel: dev.dsh.remote.net.LoopbackTunnel? = null
-
-    /**
-     * Whether the Web panels are loaded through the loopback tunnel.
-     *
-     * OFF: on-device the tunnel answered every request (the host access log shows
-     * 55 requests with `host: 127.0.0.1:3080`, all 200) yet both panels came up
-     * blank, while loading the host straight from its own URL renders them in a
-     * couple of seconds. The direct arrangement is therefore the default again.
-     *
-     * The tunnel stays in the tree, unused, because its one benefit is real:
-     * dsh's web client only offers the settings surfaces when
-     * `location.hostname` is loopback, so the settings → 模型 page needs a
-     * local-looking origin. Flip this flag once that can be debugged on-device.
-     */
-    private val WEB_PANELS_VIA_LOOPBACK = false
-
-    /**
-     * URL the embedded Web panels (设置 / 侧边栏) should load.
-     *
-     * Default: the host URL itself, which renders both panels here in seconds.
-     * With [WEB_PANELS_VIA_LOOPBACK] the page is served from 127.0.0.1 through a
-     * raw TCP tunnel, which would also unlock 设置 → 模型.
-     */
-    fun webEntryUrl(): String {
-        val base = (activeBaseUrl.value ?: serverUrl.value).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
-        if (!WEB_PANELS_VIA_LOOPBACK) return "$base/"
-        return try {
-            val uri = java.net.URI(base)
-            val host = uri.host ?: return "$base/"
-            val port = if (uri.port > 0) uri.port else 80
-            if (isLoopbackHost(host)) return "$base/"
-            loopbackTunnel?.let { if (it.port > 0) return "http://127.0.0.1:${it.port}/" }
-            val tunnel = dev.dsh.remote.net.LoopbackTunnel(host, port)
-            val bound = tunnel.start()
-            loopbackTunnel = tunnel
-            log("web tunnel 127.0.0.1:$bound -> $host:$port")
-            "http://127.0.0.1:$bound/"
-        } catch (e: Throwable) {
-            log("web tunnel failed: ${e.message}; loading the host directly")
-            "$base/"
-        }
-    }
-
-    private fun isLoopbackHost(host: String): Boolean =
-        host == "localhost" || host == "::1" || host == "[::1]" ||
-            (host.startsWith("127.") && host.split('.').let { p -> p.size == 4 && p.all { it.toIntOrNull() != null } })
-
     /** Start (once) the local Web proxy and return its port. */
     fun ensureWebProxy(): Int? {
         val base = baseUrl ?: return null
@@ -1255,7 +1149,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-
     /**
      * Return the first base URL that answers.
      *
