@@ -157,6 +157,24 @@ signingConfigs {
 
 ---
 
+## 排错：手机说「连接不上」
+
+先分清是主机问题还是链路问题，两个脚本都在 `host/` 下：
+
+```powershell
+node host\diag-app.mjs  http://<主机>:8080    # 探活 / RPC / 设置 / 两条事件流
+node host\diag-wire.mjs http://<主机>:8080    # 线上实际字节（gzip 前后）
+```
+
+- `diag-app.mjs` 全绿 → 主机和桥都是好的，问题在手机到主机这一段（Tailscale、MagicDNS、防火墙）
+- `diag-wire.mjs` 里 `session.list` 超过 ~200 KB → 桥没有在瘦身/压缩，检查是不是旧版 `bridge.js`
+- 两个脚本都用 `okhttp/4.12.0` 作 UA，必须和 App 走同一条 Caddy 路由，否则测的是另一条路
+
+链路经常是**中继**（DERP）而不是直连，`tailscale ping <手机>` 会打印 `via DERP(...)` 和延迟。
+中继下 RTT 能到一秒以上，所以主机侧的每个字节都很重要 —— 这也是 `session.list` 要瘦身到 13 KB 的原因。
+
+---
+
 ## 已知限制
 
 - Caddyfile 里的 cookie 需要你自己签发；cookie 过期后需重签
