@@ -935,8 +935,61 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Apply the saved language before any UI composes, then auto-connect.
         viewModelScope.launch { Strings.setLang(settings.language.first()) }
+        // A WebView cache carried over from a previous build renders the settings and
+        // sidebar panels blank while every request still answers 200. Wiping it once
+        // per installed version costs nothing and removes that whole failure class.
+        viewModelScope.launch(Dispatchers.Main) { clearWebViewCacheIfNewVersion() }
         fetchPrices()
         connect()
+    }
+
+    /**
+     * Drop the WebView cache when the installed build changes.
+     *
+     * Both panels are WebViews over the host's own page, and the bundle they load is
+     * cached for a year (`Cache-Control: immutable`). After an upgrade or a host
+     * frontend change that cache can describe a bundle the page no longer matches,
+     * and the result is a blank panel with a clean network log — indistinguishable
+     * from "cannot connect". Clearing once per version keeps the two in step.
+     */
+    private fun clearWebViewCacheIfNewVersion() {
+        try {
+            val ctx = getApplication<Application>()
+            val prefs = ctx.getSharedPreferences("dsh_web_cache", android.content.Context.MODE_PRIVATE)
+            val now = try {
+                ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionCode
+            } catch (_: Throwable) {
+                -1
+            }
+            if (prefs.getInt("version", -1) == now) return
+            clearWebViewCache()
+            prefs.edit().putInt("version", now).apply()
+            log("webview cache cleared for version $now")
+        } catch (e: Throwable) {
+            log("webview cache reset failed: ${e.message}")
+        }
+    }
+
+    /** Wipe the WebView cache and the panel bundle cache. Must run on the main thread. */
+    fun clearWebViewCache() {
+        try {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+        } catch (_: Throwable) {
+        }
+        try {
+            val ctx = getApplication<Application>()
+            android.webkit.WebView(ctx).apply {
+                clearCache(true)
+                clearHistory()
+                clearFormData()
+                destroy()
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            java.io.File(getApplication<Application>().filesDir, "webcache").deleteRecursively()
+        } catch (_: Throwable) {
+        }
     }
     /** Fetch the latest pricing table from `prices.json`; built-in defaults are kept on failure. */
     private fun fetchPrices() {

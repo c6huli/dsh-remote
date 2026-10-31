@@ -468,6 +468,23 @@ private fun SidebarEmbed(
                             try { webView?.reload() } catch (_: Throwable) {}
                         },
                     )
+                    Spacer(Modifier.height(6.dp))
+                    // A stale WebView cache can keep this pane blank no matter how
+                    // often it reloads; wiping it is the way out.
+                    Text(
+                        "清缓存重载",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            loadError = null
+                            ready = false
+                            vm.clearWebViewCache()
+                            try {
+                                webView?.clearCache(true)
+                                webView?.reload()
+                            } catch (_: Throwable) {}
+                        },
+                    )
                 }
             } else if (!ready) {
                 Column(

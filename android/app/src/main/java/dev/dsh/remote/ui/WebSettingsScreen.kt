@@ -786,6 +786,23 @@ private fun WebChromePanel(
                 }
             }
             TextButton(onClick = { webView?.reload() }) { Text("刷新") }
+            // A stale WebView cache renders this panel blank while every request
+            // still answers 200, so give the user a one-tap way out of it.
+            TextButton(onClick = {
+                try { android.webkit.WebStorage.getInstance().deleteAllData() } catch (_: Throwable) {}
+                try {
+                    android.webkit.WebView(context).apply {
+                        clearCache(true)
+                        clearHistory()
+                        clearFormData()
+                        destroy()
+                    }
+                } catch (_: Throwable) {}
+                try {
+                    webView?.clearCache(true)
+                    webView?.reload()
+                } catch (_: Throwable) {}
+            }) { Text("清缓存") }
             // Re-open the settings sheet if the user navigated away from it.
             TextButton(onClick = {
                 try { webView?.evaluateJavascript(OPEN_SETTINGS_JS, null) } catch (_: Throwable) {}
