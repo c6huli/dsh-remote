@@ -312,6 +312,7 @@ private fun SidebarEmbed(
     val base = (activeBaseUrl ?: serverUrl).ifBlank { "http://127.0.0.1:8080" }.trimEnd('/')
     var ready by remember { mutableStateOf(false) }
     var missing by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     var installed by remember { mutableStateOf<Boolean?>(null) }
     var webView by remember { mutableStateOf<android.webkit.WebView?>(null) }
     var activePane by remember { mutableStateOf<String?>(null) }
@@ -386,7 +387,21 @@ private fun SidebarEmbed(
                             try { addJavascriptInterface(PanelReadyBridge({ ready = true }, onChanges, { missing = true }), "DshPanel") } catch (_: Throwable) {}
                             webViewClient = object : android.webkit.WebViewClient() {
                                 override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                                    loadError = null
                                     try { view?.evaluateJavascript(SIDEBAR_JS, null) } catch (_: Throwable) {}
+                                }
+
+                                // A dead host used to leave this pane on a spinner
+                                // forever, which reads as "cannot connect" with no
+                                // way out. Surface it and offer a retry instead.
+                                override fun onReceivedError(
+                                    view: android.webkit.WebView?,
+                                    request: android.webkit.WebResourceRequest?,
+                                    error: android.webkit.WebResourceError?,
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        loadError = "${error?.errorCode}: ${error?.description}"
+                                    }
                                 }
                             }
                             isFocusable = true
@@ -412,6 +427,41 @@ private fun SidebarEmbed(
             if (missing) {
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(8.dp)) {
                     PluginMissingBlock(compact = true)
+                }
+            } else if (loadError != null) {
+                Column(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        "侧边栏加载失败",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        loadError ?: "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "$base/",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "重试",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            loadError = null
+                            ready = false
+                            try { webView?.reload() } catch (_: Throwable) {}
+                        },
+                    )
                 }
             } else if (!ready) {
                 Column(

@@ -882,22 +882,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Ask the host whether the sidebar plugin is present.
      *
-     * Checked before the panel WebView is created: waiting for a block that will
-     * never render wastes ten seconds and looks like a broken screen.
+     * Only a *positive* answer is ever cached. A negative one used to be cached
+     * forever, so a single failed probe — the bridge restarting, a reconnect race,
+     * one dead request — left both the workbench and the 文件变动 card showing
+     * "未安装插件" for the rest of the process, with no path back except killing
+     * the app. Unknown or failed probes now return true so the panel loads and the
+     * page itself decides (it reports missing via `DshPanel.missing`).
      */
     suspend fun hasBetterSidebar(): Boolean = withContext(Dispatchers.IO) {
         betterSidebar?.let { return@withContext it }
-        val dsh = api ?: return@withContext false
-        val ok = try {
+        val dsh = api ?: return@withContext true
+        try {
             val raw = dsh.settingsDescribeRaw()
-            raw["namespaces"]?.jsonArray
+            val present = raw["namespaces"]?.jsonArray
                 ?.mapNotNull { it as? JsonObject }
                 ?.any { it["ns"]?.jsonPrimitive?.contentOrNull == "better-sidebar" } ?: false
+            if (present) betterSidebar = true
+            true // optimistic: let the page report a genuinely absent plugin
         } catch (_: Exception) {
-            false
+            true // transient failure: never poison the cache, retry on the next open
         }
-        betterSidebar = ok
-        ok
     }
     private var lastBalance: Double? = null
     private var muxJob: kotlinx.coroutines.Job? = null
@@ -1137,6 +1141,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 startForegroundService()
                 collectFrames(url2, client)
                 startWatchdog()
+                // Warm the settings/sidebar bundle once, well after the first screen
+                // is up: those two panels otherwise pull ~1.5 MB the first time they
+                // are opened, which on a relayed link reads as "cannot connect".
+                warmWebCacheOnce()
                 // Refresh the DeepSeek balance if a key is already saved.
                 if (settings.deepseekApiKey.first().isNotBlank()) {
                     queryDeepseekBalance()
@@ -1146,6 +1154,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = e.message ?: "connection failed"
             } finally {
                 _connecting.value = false
+            }
+        }
+    }
+
+    /** Set once the bundle warm-up has been attempted in this process. */
+    private var webCacheWarmStarted = false
+
+    /**
+     * Download the Web bundle into the local proxy's cache, once per process.
+     *
+     * The settings and sidebar panels are WebViews over the host's own page, so
+     * without this the first open of either one is a fresh multi-hundred-KB pull.
+     * Delayed so it never competes with the conversation's first turn.
+     */
+    private fun warmWebCacheOnce() {
+        if (webCacheWarmStarted) return
+        webCacheWarmStarted = true
+        viewModelScope.launch {
+            delay(20_000L)
+            try {
+                val port = ensureWebProxy() ?: return@launch
+                val cache = java.io.File(getApplication<Application>().filesDir, "webcache")
+                val assets = java.io.File(cache, "assets")
+                if (assets.isDirectory && assets.listFiles()?.isNotEmpty() == true) return@launch
+                val n = withContext(Dispatchers.IO) { precacheWeb() }
+                log("web bundle cached: $n files (proxy $port)")
+            } catch (_: Throwable) {
             }
         }
     }

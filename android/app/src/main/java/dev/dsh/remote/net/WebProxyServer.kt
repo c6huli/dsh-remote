@@ -261,8 +261,10 @@ class WebProxyServer(
                 else -> try { builder.header(k, v) } catch (_: Exception) {}
             }
         }
-        // Ask for uncompressed bytes: we cache them verbatim.
-        builder.header("accept-encoding", "identity")
+        // Let OkHttp negotiate gzip and decode it transparently. The bytes stored on
+        // disk are the decompressed ones either way, but on the wire this is 489 KB
+        // instead of 1.5 MB — the difference between a panel that opens on a relayed
+        // tailnet link and one that looks like it cannot reach the host at all.
         builder.header("user-agent", BROWSER_UA)
         builder.method(
             method.name,
@@ -345,7 +347,7 @@ class WebProxyServer(
                 val url = upstream.trimEnd('/') + path
                 client.newCall(
                     Request.Builder().url(url)
-                        .header("accept-encoding", "identity")
+                        // gzip is negotiated by OkHttp and decoded before it reaches us.
                         .header("user-agent", BROWSER_UA)
                         .build()
                 )
