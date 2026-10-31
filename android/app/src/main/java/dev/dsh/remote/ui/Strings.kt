@@ -114,6 +114,10 @@ object Strings {
         "load_earlier" to ("加载更早的对话…" to "Load earlier…"),
         "jump_bottom" to ("回到底部" to "Jump to bottom"),
         "deliverables" to ("产物" to "Deliverables"),
+        // A turn's files are split the way the Web UI splits them: what the agent
+        // handed over, and what it merely touched along the way.
+        "final_files" to ("最终产物" to "Deliverables"),
+        "edited_files" to ("已编辑文件" to "Edited files"),
 
         // ---- decision cards ----
         "approve_once" to ("允许一次" to "Allow once"),

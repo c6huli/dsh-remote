@@ -226,30 +226,7 @@ fun ChatScreen(
                 items(rows) { row ->
                     when (row) {
                         is ChatRow.Tools -> ToolGroupCard(row.items, running)
-                        is ChatRow.Files -> Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                            // Same "产物" heading the old strip used, now over real rows so
-                            // the block reads as the turn's downloadable card. Tinted with the
-                            // edit/data hue the Web UI uses for produced files.
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(Modifier.size(6.dp).background(ToolKind.Edit.color, CircleShape))
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    Strings.str("deliverables"),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                            Spacer(Modifier.height(2.dp))
-                            row.files.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
-                            if (row.files.size > MAX_CARD_ROWS) {
-                                Text(
-                                    Strings.str("more_files", row.files.size - MAX_CARD_ROWS),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                        }
+                        is ChatRow.Files -> TurnFilesCard(row.files)
                         is ChatRow.Single -> ChatRow(
                             row.item,
                             vm::fullReasoning,
@@ -946,8 +923,24 @@ private fun toolIcon(card: String?, name: String): Int = when (card) {
 private sealed interface ChatRow {
     data class Single(val item: ChatItem) : ChatRow
     data class Tools(val items: List<ChatItem.Tool>) : ChatRow
-    /** Files produced by one turn, rendered inline right after that turn. */
-    data class Files(val files: List<FileLink>) : ChatRow
+    /** Files one turn touched, rendered inline right after that turn. */
+    data class Files(val files: TurnFiles) : ChatRow
+}
+
+/**
+ * One turn's files, split the way the Web UI splits them.
+ *
+ * [presented] are what the agent handed over (`present` / dsh deliverable cards),
+ * [edited] is everything else it wrote on the way. Edited files are usually the
+ * long tail of a turn's work, so the card keeps them collapsed.
+ */
+private data class TurnFiles(
+    val presented: List<FileLink> = emptyList(),
+    val edited: List<FileLink> = emptyList(),
+) {
+    val isEmpty: Boolean get() = presented.isEmpty() && edited.isEmpty()
+    /** Every path in the card, for the per-turn dedupe. */
+    fun paths(): Sequence<String> = (presented.asSequence() + edited.asSequence()).map { it.path }
 }
 
 /** Rows shown in a turn's file card before collapsing the rest into a `+N` hint. */
@@ -966,7 +959,8 @@ private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
     // every historical session — gets its own downloadable card. This deliberately
     // does NOT depend on the agent calling `present`: any file a tool wrote or
     // edited is listed too, which is what makes the card appear for every session.
-    var turnFiles = ArrayList<FileLink>()
+    var presented = ArrayList<FileLink>()
+    var edited = ArrayList<FileLink>()
     // A tool call and its result both describe the same file, so dedupe inside the
     // turn. Across turns a file may legitimately reappear (it changed again), which
     // is information worth keeping.
@@ -976,15 +970,23 @@ private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
         buf = ArrayList()
     }
     fun flushFiles() {
-        if (turnFiles.isNotEmpty()) out.add(ChatRow.Files(turnFiles.toList()))
-        turnFiles = ArrayList()
+        val files = TurnFiles(presented.toList(), edited.toList())
+        if (!files.isEmpty) out.add(ChatRow.Files(files))
+        presented = ArrayList()
+        edited = ArrayList()
         turnSeen = HashSet()
     }
     for (item in items) {
         if (item is ChatItem.Tool) {
             buf.add(item)
-            for (f in filesOfTool(item)) {
-                if (turnSeen.add(f.path)) turnFiles.add(f)
+            val (delivered, touched) = filesOfTool(item)
+            for (f in touched) if (turnSeen.add(f.path)) edited.add(f)
+            // A handed-over file wins over a later "edited" entry for the same path.
+            for (f in delivered) {
+                if (turnSeen.add(f.path)) presented.add(f) else {
+                    edited.removeAll { it.path == f.path }
+                    if (presented.none { it.path == f.path }) presented.add(f)
+                }
             }
         } else {
             flush()
@@ -1007,21 +1009,26 @@ private val FILE_WRITING_TOOLS = setOf(
 )
 
 /**
- * Every file one tool touched, as download rows.
+ * Every file one tool touched, split into handed-over and merely-edited.
  *
  * Three sources, so a card exists whether or not the agent called `present`:
  *  - a `files` array (the `present` tool, and dsh's own deliverable cards)
  *  - a diff card's path
  *  - the `path` / `file_path` argument of a writing tool
+ *
+ * Only `present` (and a delivered `files` array) counts as a final deliverable;
+ * write/edit style tools produced the working set, which the card keeps folded.
  */
-private fun filesOfTool(t: ChatItem.Tool): List<FileLink> {
-    val links = ArrayList<FileLink>(2)
-    links.addAll(parseFileLinks(t.card, t.arguments))
-    t.diffPath?.takeIf { it.isNotBlank() }?.let { links.add(FileLink(it, labelOf(it))) }
-    if (t.name.lowercase() in FILE_WRITING_TOOLS) {
-        pathOfToolArguments(t.arguments)?.let { links.add(FileLink(it, labelOf(it))) }
+private fun filesOfTool(t: ChatItem.Tool): Pair<List<FileLink>, List<FileLink>> {
+    val isPresent = t.name.equals("present", ignoreCase = true)
+    val delivered = ArrayList<FileLink>(2)
+    val edited = ArrayList<FileLink>(2)
+    if (isPresent) delivered.addAll(parseFileLinks(t.card, t.arguments)) else edited.addAll(parseFileLinks(t.card, t.arguments))
+    t.diffPath?.takeIf { it.isNotBlank() }?.let { edited.add(FileLink(it, labelOf(it))) }
+    if (t.name.lowercase() in FILE_WRITING_TOOLS && !isPresent) {
+        pathOfToolArguments(t.arguments)?.let { edited.add(FileLink(it, labelOf(it))) }
     }
-    return links
+    return delivered to edited
 }
 
 private fun labelOf(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
@@ -1293,6 +1300,79 @@ private fun FileLinkRow(f: FileLink) {
             }
         }
         DshIcon(DshIcons.Copy, tint = MaterialTheme.colorScheme.primary, size = 16.dp, contentDescription = null)
+    }
+}
+
+/**
+ * One turn's file card: 最终产物 on top, 已编辑文件 folded underneath.
+ *
+ * Splitting them keeps the delivered artefacts — the thing worth downloading —
+ * at eye level, while a turn that rewrote a dozen files does not push the rest of
+ * the conversation off screen. Edited rows stay one tap away and keep the same
+ * long-press-to-download action.
+ */
+@Composable
+private fun TurnFilesCard(files: TurnFiles) {
+    var showEdited by remember(files) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        if (files.presented.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(6.dp).background(ToolKind.Edit.color, CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    Strings.str("final_files"),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            files.presented.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
+            if (files.presented.size > MAX_CARD_ROWS) {
+                Text(
+                    Strings.str("more_files", files.presented.size - MAX_CARD_ROWS),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+        if (files.edited.isNotEmpty()) {
+            if (files.presented.isNotEmpty()) Spacer(Modifier.height(4.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { showEdited = !showEdited }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(6.dp).background(ToolKind.Read.color, CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "${Strings.str("edited_files")} · ${files.edited.size}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                DshIcon(
+                    if (showEdited) DshIcons.ChevronDown else DshIcons.ChevronRight,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    size = 14.dp,
+                    contentDescription = null,
+                )
+            }
+            if (showEdited) {
+                Spacer(Modifier.height(2.dp))
+                files.edited.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
+                if (files.edited.size > MAX_CARD_ROWS) {
+                    Text(
+                        Strings.str("more_files", files.edited.size - MAX_CARD_ROWS),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        }
     }
 }
 
