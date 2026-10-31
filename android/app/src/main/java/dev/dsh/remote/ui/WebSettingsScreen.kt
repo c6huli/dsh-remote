@@ -719,12 +719,23 @@ private const val OPEN_SETTINGS_JS = """
     if (rail) { rail.click(); return true; }
     return false;
   }
+  // Tell the app the settings surface is actually on screen; until then it keeps an
+  // opaque spinner over the WebView, so the notice never flashes into view.
+  var notified = false;
+  function notifyReady() {
+    if (notified) return;
+    notified = true;
+    try { if (window.DshSettings && window.DshSettings.ready) window.DshSettings.ready(); } catch (e) {}
+  }
   var rounds = 0;
   var timer = setInterval(function () {
     rounds += 1;
     dismissBlocker();
     openSettings();
-    if (settingsOpen() && rounds > 6) clearInterval(timer);
+    if (settingsOpen()) {
+      setTimeout(notifyReady, 250);
+      if (rounds > 6) clearInterval(timer);
+    }
     if (rounds > 80) clearInterval(timer);
   }, 250);
   dismissBlocker();
@@ -766,6 +777,8 @@ private fun WebChromePanel(
     var loading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var progress by remember { mutableStateOf(0) }
+    // Covers the WebView until the settings surface reports itself ready.
+    var revealed by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val bgColor = MaterialTheme.colorScheme.background
     val bgArgb = android.graphics.Color.argb(
@@ -783,6 +796,11 @@ private fun WebChromePanel(
             loadError = "加载超时（60 秒），检查手机能否访问该地址"
             loading = false
         }
+    }
+    // Never leave the panel invisible because the page failed to report ready.
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(15_000L)
+        revealed = true
     }
 
     BackHandler {
@@ -918,6 +936,18 @@ private fun WebChromePanel(
                         try {
                             addJavascriptInterface(PanelJsBridge(onClose), "DshNative")
                         } catch (_: Throwable) {}
+                        // The page reports when the settings surface is really on
+                        // screen; until then an opaque spinner covers this WebView so
+                        // the host's first-run notice never flashes into view.
+                        try {
+                            addJavascriptInterface(object {
+                                @android.webkit.JavascriptInterface
+                                fun ready() {
+                                    android.os.Handler(android.os.Looper.getMainLooper())
+                                        .post { revealed = true }
+                                }
+                            }, "DshSettings")
+                        } catch (_: Throwable) {}
                         try { loadUrl(url) } catch (_: Throwable) {}
                         webView = this
                     }
@@ -932,5 +962,25 @@ private fun WebChromePanel(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             onRelease = { v -> try { if (v is WebView) v.destroy() } catch (_: Throwable) {} },
         )
+        // Opaque cover until the settings surface reports itself ready: the host's
+        // first-run notice is auto-dismissed by the injected script, and hiding that
+        // dance (instead of showing a dialog flash) is what makes opening the panel
+        // feel seamless. The timeout keeps a broken page from staying invisible.
+        if (!revealed) {
+            Box(
+                Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.background),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "正在打开设置…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }

@@ -15,8 +15,8 @@ android {
         applicationId = "dev.dsh.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 179
-        versionName = "1.5.100-ts"
+        versionCode = 180
+        versionName = "1.5.101-ts"
     }
 
     // Signing is read from `keystore.properties` (git-ignored) so the private
