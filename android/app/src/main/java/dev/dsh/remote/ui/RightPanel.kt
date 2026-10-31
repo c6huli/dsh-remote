@@ -237,10 +237,17 @@ fun IsolatedPane(vm: AppViewModel, pane: String, modifier: Modifier = Modifier) 
                         cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                     }
                     webViewClient = object : android.webkit.WebViewClient() {
+                        // Plain http: crypto.randomUUID only exists in secure
+                        // contexts, and plugins call it during init.
+                        override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
+                        }
                         override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
                             try {
                                 // No harvesting here: this view *is* the pane.
                                 view?.evaluateJavascript("window.__dshNoHarvest = true;", null)
+                                try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
                                 view?.evaluateJavascript(SIDEBAR_JS, null)
                                 view?.postDelayed({
                                     try {
@@ -388,7 +395,14 @@ private fun SidebarEmbed(
                             }
                             try { addJavascriptInterface(PanelReadyBridge({ ready = true }, onChanges, { missing = true }), "DshPanel") } catch (_: Throwable) {}
                             webViewClient = object : android.webkit.WebViewClient() {
+                        // Plain http: crypto.randomUUID only exists in secure
+                        // contexts, and plugins call it during init.
+                        override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
+                        }
                                 override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                                    try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
                                     try { view?.evaluateJavascript(SIDEBAR_JS, null) } catch (_: Throwable) {}
                                 }
                             }

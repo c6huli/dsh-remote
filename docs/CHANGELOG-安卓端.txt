@@ -148,10 +148,13 @@ DSH Remote 安卓端版本记录
 1.5.102 加：侧边栏提供「终端」「侧边对话(beta)」—— 不再隐藏这两个 panel 卡片；
             原生切换条也从 3 个增到 5 个（文件/文件变动/任务管理/侧边对话/终端），
             打开后自动点一次插件里的「新建」以建出会话；窗口尺寸做了重测以适配 xterm。
+1.5.103 修：终端 / 侧边对话加载不出来 —— 面板走 http，属非安全上下文，
+            crypto.randomUUID 不存在，插件初始化抛 pageerror。新增 PANEL_POLYFILL_JS，
+            在 onPageStarted（以及 onPageFinished 复注入）补上 v4 UUID；三个 WebView 都注入。
 
 
 当前版本
 ----------------------------------------
-1.5.102-ts / versionCode 181
+1.5.103-ts / versionCode 182
 签名 ef071c7a…（自 1.5.3 起未变，可直接覆盖升级）
 下载位置默认 下载/DSHRemote，可在设置里改或改选任意目录

@@ -878,9 +878,21 @@ private fun WebChromePanel(
                             cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                         }
                         webViewClient = object : WebViewClient() {
+                            // The page is served over plain http, so `crypto.randomUUID`
+                            // does not exist (it is gated on secure contexts). Client
+                            // plugins call it during init, so the polyfill has to land
+                            // before their scripts run — hence onPageStarted.
+                            override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
+                            }
+
                             override fun onPageFinished(view: android.webkit.WebView?, u: String?) {
                                 loading = false
                                 progress = 100
+                                // Re-apply: SPA chunks loaded after the initial commit may
+                                // have captured `crypto` before the polyfill landed.
+                                try { view?.evaluateJavascript(PANEL_POLYFILL_JS, null) } catch (_: Throwable) {}
                                 // The phone-fit transform used to arrive through the
                                 // local proxy's HTML rewrite; it is applied here now,
                                 // so this panel no longer depends on a localhost hop.
