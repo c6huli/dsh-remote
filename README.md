@@ -2,6 +2,8 @@
 
 把 [DeepSeek Harness](https://github.com/deepseek-ai)（dsh 0.2.x）搬到手机上用的完整方案：一个安卓 App + 一台 Windows 主机上的配套工具。
 
+> 作者：[@c6huli](https://github.com/c6huli)　仓库：https://github.com/c6huli/dsh-remote
+>
 > 本仓库是**个人自用工具**，不是官方项目。dsh 本身请从其官方渠道获取。
 
 ---
