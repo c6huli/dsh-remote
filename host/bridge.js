@@ -20,6 +20,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const WebSocket = require('ws');
 
 const LISTEN_PORT = Number(process.env.BRIDGE_PORT || 3084);
@@ -59,8 +60,77 @@ function dshCookie() {
 
 const dshHeaders = (extra = {}) => ({ host: AUTHORITY, cookie: dshCookie(), ...extra });
 
+// ---------------- wire size control (the phone link is slow) ----------------
+/**
+ * Write a JSON body, gzipping it when the client advertises gzip.
+ *
+ * OkHttp adds `Accept-Encoding: gzip` and transparently decompresses, so this
+ * is invisible to the App but shrinks the session list by roughly 10x. That
+ * matters because the tailnet path is frequently relayed (DERP) with a
+ * 0.3-1.4 s RTT: a 400 KB pull there can take longer than the client's probe
+ * budget, which is what made connecting look broken.
+ */
+function writeJsonBody(res, code, text, extraHeaders = {}) {
+  const buf = Buffer.from(text, 'utf8');
+  const accept = String(res.req?.headers?.['accept-encoding'] || '');
+  const headers = { 'content-type': 'application/json', ...extraHeaders };
+  if (buf.length >= 1024 && /\bgzip\b/i.test(accept)) {
+    const gz = zlib.gzipSync(buf, { level: 6 });
+    res.writeHead(code, {
+      ...headers,
+      'content-encoding': 'gzip',
+      vary: 'accept-encoding',
+      'content-length': gz.length,
+    });
+    res.end(gz);
+    return;
+  }
+  res.writeHead(code, { ...headers, 'content-length': buf.length });
+  res.end(buf);
+}
+
+/**
+ * Projection values the legacy client actually renders.
+ *
+ * `session/list` ships every projection for every session. `turnOutline` alone
+ * is ~227 KB of a ~400 KB list and the App has no model for it at all, so it
+ * was pure download cost on every connect, every 2 s during a run, and on
+ * every watchdog tick.
+ */
+const CLIENT_PROJECTIONS = new Set([
+  'asOfSeq', 'title', 'sessionStats', 'goal', 'todos', 'permissions', 'plan',
+  'tokenUsage', 'contextPressure', 'contextBreakdown', 'modelSelection',
+  'inbox', 'subagentCatalog', 'agentPreset', 'subagent',
+]);
+
+/** Drop projection values the App cannot render. Never mutates the dsh reply shape. */
+function slimSessionList(r) {
+  const items = Array.isArray(r?.value?.items) ? r.value.items : null;
+  if (!items) return r;
+  for (const item of items) {
+    const values = item?.projections?.values;
+    if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+    const kept = {};
+    for (const key of Object.keys(values)) {
+      if (CLIENT_PROJECTIONS.has(key)) kept[key] = values[key];
+    }
+    item.projections.values = kept;
+  }
+  return r;
+}
+
+
 // ---------------- unary RPC to dsh ----------------
-function dshRpc(endpoint, args) {
+/**
+ * One unary call.
+ *
+ * The signed cookie is memoised for ~30 days, so if dsh ever regenerates its
+ * `client-connection/browser-session` secret (reinstall, restored profile,
+ * dsh upgrade), the cached cookie dies and every request 401s forever while
+ * the host itself looks perfectly healthy — the exact "连接不上" symptom with
+ * no clue on the host side. A 401 therefore re-signs once and retries.
+ */
+function dshRpc(endpoint, args, retried = false) {
   const body = JSON.stringify({
     type: 'client-request', rpcId: crypto.randomUUID(), method: endpoint, payload: { args: args ?? {} },
   });
@@ -69,6 +139,13 @@ function dshRpc(endpoint, args) {
       host: DSH.host, port: DSH.port, path: `/api/${endpoint}`, method: 'POST',
       headers: dshHeaders({ 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }),
     }, (res) => {
+      if (res.statusCode === 401 && !retried) {
+        res.resume();
+        cookieCache = { value: null, expiresAt: 0 };
+        log('dsh said 401 — re-signing the session cookie and retrying', endpoint);
+        resolve(dshRpc(endpoint, args, true));
+        return;
+      }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
@@ -329,7 +406,9 @@ async function legacyCall(method, p) {
       return { ok: true, value: await workspaceList() };
 
     case 'session.list':
-      return dshRpc('session/list', { _request: {} });
+      // Slimmed before it goes on the wire: the raw reply is ~400 KB, which the
+      // App re-pulls on connect, on watchdog ticks and every 2 s during a run.
+      return slimSessionList(await dshRpc('session/list', { _request: {} }));
 
     case 'settings.describe': {
       const r = await dshRpc('settings/describe', p);
@@ -475,12 +554,10 @@ const server = http.createServer(async (req, res) => {
     } else {
       log('rpc ok', method);
     }
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ type: 'server-response', rpcId: crypto.randomUUID(), result }));
+    writeJsonBody(res, 200, JSON.stringify({ type: 'server-response', rpcId: crypto.randomUUID(), result }));
   } catch (error) {
     log('call failed', method, error.message);
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ type: 'server-response', rpcId: crypto.randomUUID(), result: { ok: false, error: { code: 'bridge/failure', message: String(error.message), details: {} } } }));
+    writeJsonBody(res, 200, JSON.stringify({ type: 'server-response', rpcId: crypto.randomUUID(), result: { ok: false, error: { code: 'bridge/failure', message: String(error.message), details: {} } } }));
   }
 });
 
@@ -489,9 +566,7 @@ const server = http.createServer(async (req, res) => {
 // bridge re-implements them directly against the local filesystem.
 
 function sendJson(res, code, obj, extraHeaders = {}) {
-  const body = JSON.stringify(obj);
-  res.writeHead(code, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...extraHeaders });
-  res.end(body);
+  writeJsonBody(res, code, JSON.stringify(obj), extraHeaders);
 }
 
 function sendRemoteErr(res, code, message) {

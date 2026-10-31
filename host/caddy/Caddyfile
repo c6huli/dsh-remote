@@ -33,6 +33,10 @@
     @index path /
     header @index Cache-Control "no-cache"
 
+    # 手机经 Tailscale 中继（DERP）连过来时，未压缩的前端包和 /api JSON
+    # 会慢到让客户端以为自己连不上。（bridge 已经自己 gzip，Caddy 不会重复压缩。）
+    encode zstd gzip
+
     reverse_proxy localhost:3080 {
       header_up Host 127.0.0.1:3080
       header_up -Origin
