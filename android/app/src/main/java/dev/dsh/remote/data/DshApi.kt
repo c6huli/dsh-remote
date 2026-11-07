@@ -2,11 +2,13 @@ package dev.dsh.remote.data
 
 import dev.dsh.remote.net.DshJson
 import dev.dsh.remote.net.RpcClient
+import java.io.IOException
 import java.net.URLEncoder
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -183,7 +185,76 @@ class DshApi(private val rpc: RpcClient) {
         rpc.invoke("session.prompt", payload)
     }
 
+    /**
+     * Send text plus staged file uploads as one prompt. Each file is a
+     * `{ type:"file", receiptId }` part (see `PromptContentPart`), the only form
+     * the host binds to a prompt; `receiptId` comes from `uploadAttachment`.
+     */
+    suspend fun sessionPromptFiles(sessionId: String, receiptIds: List<String>, text: String) {
+        val payload = buildJsonObject {
+            put("sessionId", sessionId)
+            put("mode", "queue")
+            putJsonArray("content") {
+                for (rid in receiptIds) {
+                    addJsonObject { put("type", "file"); put("receiptId", rid) }
+                }
+                if (text.isNotBlank()) {
+                    addJsonObject { put("type", "text"); put("text", text) }
+                }
+            }
+        }
+        rpc.invoke("session.prompt", payload)
+    }
+
     /** Archive (remove) a session from the active list. */
+    /**
+     * 让模型把一句人话翻译成手机动作(意图分析)。
+     *
+     * 走宿主的普通会话通道:在一个**专用的规划会话**里发一条带严格 JSON 输出
+     * 要求的提示词,等这一轮结束再把最后一条 assistant 文本取回来。用一个长期
+     * 存在的会话而不是每次新建,是为了省掉建会话的开销,也方便后面看历史。
+     *
+     * 失败(模型/网络/解析)一律返回 null,由调用方回退到本地规则解析——手机上
+     * 不能因为桌面模型不可用就整页不能用。
+     */
+    suspend fun planPhoneIntent(
+        plannerSessionId: String,
+        text: String,
+        timeoutMs: Long = 25_000,
+    ): String? {
+        // Baseline BEFORE prompting: the planner session is reused, so anything
+        // already at or below this seq is a previous instruction's answer. Without
+        // this the very first poll would return the stale reply from last time.
+        val baseline = try {
+            sessionHistory(plannerSessionId, maxMessages = 6).events.maxOfOrNull { it.event.seq } ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+        sessionPrompt(plannerSessionId, text)
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            // delay() is the cancellation point: a cancelled Stop must leave here
+            // instead of being captured by the catch below and spinning on.
+            kotlinx.coroutines.delay(350)
+            val history = try {
+                sessionHistory(plannerSessionId, maxMessages = 30)
+            } catch (t: kotlin.coroutines.cancellation.CancellationException) {
+                throw t
+            } catch (_: Exception) {
+                continue
+            }
+            // Newest assistant reply that arrived strictly after our prompt.
+            val reply = history.events
+                .asReversed()
+                .firstOrNull { it.event.type == "assistant/message" && it.event.seq > baseline }
+                ?: continue
+            val content = (reply.event.data["message"] as? JsonObject)?.get("content")
+            val body = textOf(content)
+            if (body.isNotBlank()) return body
+        }
+        return null
+    }
+
     suspend fun archiveSession(sessionId: String) {
         val payload = buildJsonObject { put("sessionId", sessionId) }
         rpc.invoke("workspace.archiveSession", payload)
@@ -219,12 +290,13 @@ class DshApi(private val rpc: RpcClient) {
      * (the host logs nothing in that case), so callers can fall back to a plain prompt.
      */
     suspend fun commandExecute(sessionId: String, line: String): CommandExecuteValue? {
-        val args = buildJsonObject {
+        // The host gateway expects a FLAT payload (agentId / line / submittedAttachments),
+        // not an {"args":…} wrapper — a wrapper yields gateway/arguments-invalid.
+        val payload = buildJsonObject {
             put("agentId", sessionId)
             put("line", line)
-            putJsonArray("images") { /* no image attachments for slash commands */ }
+            putJsonArray("submittedAttachments") { /* no attachments for slash commands */ }
         }
-        val payload = buildJsonObject { put("args", args) }
         val v = rpc.invoke("commands/execute", payload)
         if (v is JsonNull) return null
         return json.decodeFromJsonElement(CommandExecuteValue.serializer(), v)
@@ -232,9 +304,7 @@ class DshApi(private val rpc: RpcClient) {
 
     /** List the host's slash-command directory for one session (`commands.list`). */
     suspend fun commandList(sessionId: String): List<CommandDescriptor> {
-        val args = buildJsonObject { put("agentId", sessionId) }
-        val payload = buildJsonObject { put("args", args) }
-        val v = rpc.invoke("commands/list", payload)
+        val v = rpc.invoke("commands/list", buildJsonObject { put("agentId", sessionId) })
         return json.decodeFromJsonElement(ListSerializer(CommandDescriptor.serializer()), v)
     }
 
@@ -432,6 +502,39 @@ class DshApi(private val rpc: RpcClient) {
         rpc.postJson("/remote/upload", payload.toString())
     }
 
+    /**
+     * 上传一个附件给会话(文档 / 表格 / 演示 / 图片 / 压缩包……)。
+     *
+     * 走宿主的 Typert Remote `fileUploads.upload`(JSON RPC,base64 data + name)。
+     * 实测这个 RPC 在 legacy bridge(:3084,app 实际连接的端口)上可用,而流式
+     * 原始字节路由 `/api/session/uploadFileBinary` 只在鉴权的 dsh web 侧注册,
+     * 打到 bridge 会 404/400 "bad json"。返回收据 `receiptId`,发消息时用
+     * `{ type:"file", receiptId }` 内容块绑定到提示词(见 `PromptContentPart`)。
+     */
+    suspend fun uploadAttachment(
+        sessionId: String,
+        name: String,
+        bytes: ByteArray,
+        mime: String?,
+        onProgress: ((Float) -> Unit)? = null,
+    ): UploadedAttachment {
+        val payload = buildJsonObject {
+            put("agentId", sessionId)
+            putJsonObject("request") {
+                put("data", java.util.Base64.getEncoder().encodeToString(bytes))
+                put("name", name)
+            }
+        }
+        val v = rpc.invoke("fileUploads.upload", payload)
+        val value = v as? JsonObject ?: throw IOException("fileUploads.upload 响应不是对象")
+        val file = value["file"]?.jsonObject ?: throw IOException("fileUploads.upload 响应缺少 value.file")
+        return UploadedAttachment(
+            name = (file["name"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: name,
+            receiptId = (value["receiptId"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: "",
+            bytes = (file["bytes"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.toLongOrNull() ?: bytes.size.toLong(),
+            attachmentId = (file["attachmentId"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: "",
+        )
+    }
     /** Delete a file or directory in the workspace via the remote-control route. */
     suspend fun deleteFile(path: String) {
         val payload = buildJsonObject { put("path", path) }
@@ -493,6 +596,45 @@ data class ImageData(
     val name: String? = null,
 )
 
+/** 宿主落盘后的附件信息。 */
+data class UploadedAttachment(
+    val name: String,
+    /** 发消息用的 `type:"file"` 收据 id(prompt 绑定到暂存文件必需)。 */
+    val receiptId: String,
+    val bytes: Long,
+    /** 宿主的持久附件 id(拉取图床缩略图用)。 */
+    val attachmentId: String = "",
+    /** 宿主识别的类型标签(如 "PDF 文档"),可能为空。 */
+    val label: String? = null,
+    val sniffedType: String? = null,
+    /** 纯文本模型下宿主生成的图片描述。 */
+    val imageDescription: String? = null,
+    val deduplicated: Boolean = false,
+)
+
+/** 按扩展名猜 MIME;猜不到返回 null(交给宿主嗅探)。 */
+internal fun mimeOfAttachment(name: String): String? =
+    when (name.substringAfterLast('.', "").lowercase()) {
+        "pdf" -> "application/pdf"
+        "doc" -> "application/msword"
+        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xls" -> "application/vnd.ms-excel"
+        "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "ppt" -> "application/vnd.ms-powerpoint"
+        "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        "txt", "md", "log" -> "text/plain"
+        "csv" -> "text/csv"
+        "json" -> "application/json"
+        "html", "htm" -> "text/html"
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "webp" -> "image/webp"
+        "gif" -> "image/gif"
+        "zip" -> "application/zip"
+        "epub" -> "application/epub+zip"
+        "rtf" -> "application/rtf"
+        else -> null
+    }
 /** A durable image attachment fetched from the host (bytes as base64). */
 data class AttachmentImage(
     val attachmentId: String,

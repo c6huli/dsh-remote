@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -55,14 +56,25 @@ fun BalanceScreen(vm: AppViewModel, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { if (apiKey.isNotBlank()) vm.queryDeepseekBalance() }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                DshIcon(DshIcons.ChevronLeft, tint = MaterialTheme.colorScheme.onSurface, size = 22.dp, contentDescription = Strings.str("back"))
-            }
-            Text(Strings.str("balance_title"), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            dev.dsh.remote.ui.theme.GlassIconButton(icon = DshIcons.ChevronLeft, onClick = onBack)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                Strings.str("balance_title"),
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.headlineMedium,
+                color = scheme.onSurface,
+            )
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(20.dp))
 
         Text("API Key", style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(6.dp))
@@ -117,27 +129,29 @@ private fun BalanceCard(info: DeepseekBalanceInfo) {
     val granted = info.granted_balance.toDoubleOrNull() ?: 0.0
     val toppedUp = info.topped_up_balance.toDoubleOrNull() ?: 0.0
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
-            .padding(14.dp),
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    dev.dsh.remote.ui.theme.GlassSurface(
+        tier = dev.dsh.remote.ui.theme.GlassTier.Card,
+        shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+        modifier = Modifier.fillMaxWidth(),
     ) {
+    Column(Modifier.padding(16.dp)) {
         Text(
             Strings.str("total_balance", info.currency),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = sem.textTertiary,
             style = MaterialTheme.typography.labelMedium,
         )
         Text(
             info.total_balance,
-            color = MaterialTheme.colorScheme.onBackground,
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
+            color = scheme.onSurface,
+            style = MaterialTheme.typography.displaySmall,
+            fontWeight = FontWeight.Light,
         )
         Spacer(Modifier.height(10.dp))
         Text(
             Strings.str("available", if (balanceAvailable(info)) Strings.str("yes") else Strings.str("no")),
-            color = if (balanceAvailable(info)) DshGreen else MaterialTheme.colorScheme.error,
+            color = if (balanceAvailable(info)) sem.success else sem.danger,
             style = MaterialTheme.typography.labelSmall,
         )
         Spacer(Modifier.height(12.dp))
@@ -148,7 +162,7 @@ private fun BalanceCard(info: DeepseekBalanceInfo) {
                 Modifier
                     .fillMaxWidth()
                     .height(14.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(7.dp)),
+                    .background(scheme.onSurface.copy(alpha = 0.08f), RoundedCornerShape(7.dp)),
             ) {
                 val grantedFrac = (granted / total).toFloat().coerceIn(0f, 1f)
                 val toppedFrac = (toppedUp / total).toFloat().coerceIn(0f, 1f)
@@ -156,7 +170,7 @@ private fun BalanceCard(info: DeepseekBalanceInfo) {
                     Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(grantedFrac)
-                        .background(DshAmber),
+                        .background(sem.warning),
                 )
                 Box(
                     Modifier
@@ -169,6 +183,7 @@ private fun BalanceCard(info: DeepseekBalanceInfo) {
             LegendRow(Strings.str("granted_balance"), info.granted_balance, DshAmber)
             LegendRow(Strings.str("topped_up_balance"), info.topped_up_balance, DshPrimary)
         }
+    }
     }
 }
 

@@ -17,6 +17,9 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.MediaType
+import okhttp3.RequestBody
+import okio.BufferedSink
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -148,6 +151,54 @@ class RpcClient(
         }
     }
 
+    /**
+     * POST raw bytes with custom headers, returning the response body as text.
+     *
+     * `dsh-file-upload` 的 `POST /api/upload` 收的是**原始文件字节**(不是 base64、
+     * 不是 multipart),文件名走 `x-file-name`、会话走 `x-session-id`。之前用 JSON
+     * 包装(和 `/remote/upload` 那套混淆)必然被它按扩展名/长度拒掉,这正是
+     * "pptx / word 全部上传失败"的原因。
+     *
+     * [onProgress] 会以 0..1 汇报写入进度(OkHttp 的请求体是流式的,大文件也不会
+     * 一次性进内存)。
+     */
+    suspend fun postBytes(
+        path: String,
+        bytes: ByteArray,
+        headers: Map<String, String> = emptyMap(),
+        contentType: MediaType? = null,
+        onProgress: ((Float) -> Unit)? = null,
+    ): String = withContext(Dispatchers.IO) {
+        val body = object : RequestBody() {
+            override fun contentType(): MediaType? = contentType
+            override fun contentLength(): Long = bytes.size.toLong()
+            override fun writeTo(sink: BufferedSink) {
+                val total = bytes.size.coerceAtLeast(1)
+                val chunk = 64 * 1024
+                var written = 0
+                while (written < bytes.size) {
+                    val end = minOf(written + chunk, bytes.size)
+                    sink.write(bytes, written, end - written)
+                    written = end
+                    onProgress?.invoke(written.toFloat() / total)
+                }
+                sink.flush()
+            }
+        }
+        val builder = Request.Builder()
+            .url("$normalizedBase$path")
+            .post(body)
+            .header("Origin", normalizedBase)
+        for ((k, v) in headers) builder.header(k, v)
+        val response = client.newCall(builder.build()).await()
+        response.use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IOException("HTTP ${resp.code}" + if (text.isNotBlank()) ": " + text.take(300) else "")
+            }
+            text
+        }
+    }
     /** Stream an HTTP GET response body directly to a local file (no memory buffering). */
     suspend fun downloadToFile(path: String, out: File): File = withContext(Dispatchers.IO) {
         val req = Request.Builder().url("$normalizedBase$path").get().header("Origin", normalizedBase).build()

@@ -1,0 +1,11 @@
+﻿# dsh-phone-control bundle patch: one insert registering the agent phone-control tool.
+#
+# The row id must match the node half's exported cordis `name`.
+- insert:
+    - id: dsh-phone-control
+      name: 'dsh-phone-control'
+      config:
+        endpoint: 'http://127.0.0.1:3087'
+        token: ''
+        tokenFile: ''
+        timeoutMs: 30000

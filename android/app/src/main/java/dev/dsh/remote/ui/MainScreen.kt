@@ -2,6 +2,8 @@ package dev.dsh.remote.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,6 +59,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import dev.dsh.remote.ui.icons.DshIcon
 import dev.dsh.remote.ui.icons.DshIcons
+import dev.dsh.remote.ui.theme.AppShape
+import dev.dsh.remote.ui.theme.LocalDshSemantic
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -82,6 +87,9 @@ fun MainScreen(vm: AppViewModel) {
     val error by vm.error.collectAsState()
     val running by vm.running.collectAsState()
     val title = sessions.firstOrNull { it.sessionId == currentId }?.title ?: "DSH Remote"
+    // 连接失败提示条是否被用户手动关掉；重新连上后自动复位，下次再失败还会提示。
+    var noticeDismissed by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(connected) { if (connected) noticeDismissed = false }
     var showPanel by rememberSaveable { mutableStateOf(false) }
     var showFileBrowser by remember { mutableStateOf(false) }
     var showSubagents by remember { mutableStateOf(false) }
@@ -89,6 +97,8 @@ fun MainScreen(vm: AppViewModel) {
     // Settings live inside the drawer's scope, so the sidebar stays reachable from
     // every screen instead of being replaced by a top-level navigation switch.
     var showSettings by remember { mutableStateOf(false) }
+    // 手机操控页：侧边栏入口，受设置里的总开关控制。
+    var showPhone by remember { mutableStateOf(false) }
     val wantDownloads by vm.openDownloads.collectAsState()
     androidx.compose.runtime.LaunchedEffect(wantDownloads) { if (wantDownloads) showSettings = true }
     // 文件变动 summary reported by the embedded panel; shown under the conversation.
@@ -105,12 +115,24 @@ fun MainScreen(vm: AppViewModel) {
         // horizontal gestures (and the embedded Web panels) far too often.
         gesturesEnabled = false,
         drawerContent = {
-            ModalDrawerSheet(
-                modifier = Modifier.width(300.dp),
-                drawerContainerColor = MaterialTheme.colorScheme.surface,
+            // 抽屉自己画成玻璃面板:不透明底会把页面渐变挡死,只剩一块死白。
+            val surfaces = dev.dsh.remote.ui.theme.LocalDshSurfaces.current
+            Box(
+                Modifier
+                    .width(312.dp)
+                    .fillMaxHeight()
+                    .clip(
+                        RoundedCornerShape(
+                            topEnd = dev.dsh.remote.ui.theme.AppShape.xl,
+                            bottomEnd = dev.dsh.remote.ui.theme.AppShape.xl,
+                        ),
+                    )
+                    .background(surfaces.sheet.fallbackFill)
+                    .drawBehind { }
             ) {
                 SidebarContent(
                     vm = vm,
+                    onCollapse = { scope.launch { drawerState.close() } },
                     onSelectSession = { id ->
                         vm.openSession(id)
                         scope.launch { drawerState.close() }
@@ -133,6 +155,10 @@ fun MainScreen(vm: AppViewModel) {
                         showSubagents = true
                         scope.launch { drawerState.close() }
                     },
+                    onOpenPhone = {
+                        showPhone = true
+                        scope.launch { drawerState.close() }
+                    },
                     onCreateWorkspace = {
                         vm.openFileBrowser()
                         pickWorkspaceDir = true
@@ -142,7 +168,10 @@ fun MainScreen(vm: AppViewModel) {
             }
         },
     ) {
-        if (showSettings) {
+        if (showPhone) {
+            androidx.activity.compose.BackHandler { showPhone = false }
+            PhoneScreen(vm, onBack = { showPhone = false })
+        } else if (showSettings) {
             // Inside the drawer, but instead of the app's own chrome: the settings
             // screen brings its own header.
             androidx.activity.compose.BackHandler { showSettings = false }
@@ -152,45 +181,58 @@ fun MainScreen(vm: AppViewModel) {
                 onOpenDrawer = openDrawer,
             )
         } else {
-            Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (running) {
-                                StateDot("ongoing", size = 10.dp)
-                                Spacer(Modifier.width(8.dp))
+            // 顶栏不用 Material 的 TopAppBar:它带不透明底色和 elevation,会把
+            // 页面渐变切出一道。这里自己排:玻璃圆钮 + 标题 + 玻璃圆钮,浮在内容上。
+            Box(Modifier.fillMaxSize()) {
+                Column(Modifier.fillMaxSize()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        dev.dsh.remote.ui.theme.GlassIconButton(
+                            icon = DshIcons.PanelLeft,
+                            onClick = { scope.launch { drawerState.open() } },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (running) {
+                                    dev.dsh.remote.ui.theme.BreathingDot(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        size = 7.dp,
+                                        running = true,
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(
+                                    title,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
                             }
-                            Text(
-                                title,
-                                maxLines = 1,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                fontWeight = FontWeight.Bold,
-                                style = MaterialTheme.typography.titleLarge,
-                                modifier = Modifier.weight(1f),
-                            )
                         }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            DshIcon(DshIcons.PanelLeft, tint = MaterialTheme.colorScheme.onSurface, size = 22.dp, contentDescription = Strings.str("menu"))
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = { vm.goHome() }) {
-                            DshIcon(DshIcons.Fish, tint = MaterialTheme.colorScheme.onSurface, size = 20.dp, contentDescription = Strings.str("back_home"))
-                        }
-                        IconButton(onClick = { showPanel = !showPanel }) {
-                            DshIcon(DshIcons.Data, tint = MaterialTheme.colorScheme.onSurface, size = 20.dp, contentDescription = Strings.str("sidebar"))
-                        }
-                        IconButton(onClick = { showSettings = true }) {
-                            DshIcon(DshIcons.Settings, tint = MaterialTheme.colorScheme.onSurface, size = 20.dp, contentDescription = Strings.str("settings"))
-                        }
-                    },
-                )
-            },
-        ) { padding ->
-            Box(Modifier.padding(padding).fillMaxSize()) {
+                        dev.dsh.remote.ui.theme.GlassIconButton(
+                            icon = DshIcons.Fish,
+                            onClick = { vm.goHome() },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        dev.dsh.remote.ui.theme.GlassIconButton(
+                            icon = DshIcons.Data,
+                            onClick = { showPanel = !showPanel },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        dev.dsh.remote.ui.theme.GlassIconButton(
+                            icon = DshIcons.Settings,
+                            onClick = { showSettings = true },
+                        )
+                    }
+                    Box(Modifier.fillMaxSize()) {
                 when {
                     showFileBrowser -> FileBrowserScreen(vm, onBack = { showFileBrowser = false })
                     pickWorkspaceDir -> FileBrowserScreen(
@@ -219,28 +261,84 @@ fun MainScreen(vm: AppViewModel) {
                                     showFileBrowser = true
                                 },
                                 onOpenSubagents = { showSubagents = true },
+                                onOpenPhone = { showPhone = true },
                                 onOpenSettings = { showSettings = true },
                             )
                         }
                     }
                 }
+                    }
+                }
             }
-        }
         }
     }
 
-    if (!connected && error != null) {
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text(Strings.str("connection_failed")) },
-            text = { Text(error ?: Strings.str("cannot_connect_server")) },
-            confirmButton = {
-                TextButton(onClick = { vm.connect() }) { Text(Strings.str("retry")) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettings = true }) { Text(Strings.str("settings")) }
-            },
+    // 连不上不再是"墙"。
+    //
+    // 原来是 onDismissRequest = {} 的模态对话框：只要主机不可达，整个界面就被
+    // 挡住，连「设置」都要先关掉弹窗才能点——等于必须先连上才能用 App。现在改成
+    // 顶部一条可关掉/可重试的提示，App 本身照常可用（设置、手机操控、已下载文件
+    // 都不依赖连接），连上后提示自己消失。
+    if (!connected && error != null && !noticeDismissed) {
+        ConnectionNotice(
+            message = error ?: Strings.str("cannot_connect_server"),
+            onRetry = { vm.connect() },
+            onOpenSettings = { showSettings = true },
+            onDismiss = { noticeDismissed = true },
         )
+    }
+}
+
+/**
+ * 非阻塞的连接失败提示条。
+ *
+ * 刻意不用 AlertDialog：连接是后台行为，不该拦住前台。这里只说清楚"没连上"，
+ * 并给出重试/设置/关掉三个出口，关掉后仍能正常使用 App 的本地部分。
+ */
+@Composable
+private fun ConnectionNotice(
+    message: String,
+    onRetry: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sem = LocalDshSemantic.current
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(AppShape.md))
+                .background(sem.dangerContainer)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Text(
+                Strings.str("connection_failed"),
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodyMedium,
+                color = sem.onDangerContainer,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                message,
+                style = MaterialTheme.typography.labelSmall,
+                color = sem.onDangerContainer,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onRetry) {
+                    Text(Strings.str("retry"), color = sem.onDangerContainer, fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(onClick = onOpenSettings) {
+                    Text(Strings.str("settings"), color = sem.onDangerContainer)
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text(Strings.str("close"), color = sem.onDangerContainer)
+                }
+            }
+        }
     }
 }
 
@@ -254,6 +352,7 @@ private fun SessionView(
     onFileChanges: (String, List<String>) -> Unit = { _, _ -> },
     onOpenFiles: () -> Unit = {},
     onOpenSubagents: () -> Unit = {},
+    onOpenPhone: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
 ) {
     var tab by remember { mutableIntStateOf(0) }
@@ -299,7 +398,11 @@ private fun HomeScreen(vm: AppViewModel, onSelect: (String) -> Unit) {
     val pendingApprovals by vm.pendingApprovals.collectAsState()
 
     // Blank host-side sessions are noise here as well.
-    val real = remember(sessions) { sessions.filter { !it.blank } }
+    val archivedIds = vm.archivedSessionIds.collectAsState().value
+    // 首页也只列有内容的会话:空壳(建了没说话)和归档的不占位置。
+    val real = remember(sessions, archivedIds) {
+        sessions.filter { it.sessionId !in archivedIds && !it.blank }
+    }
     val runningSessions = remember(real) { real.filter { it.running && !it.isSubagent } }
     // Recently finished (≤5 min) and not yet opened.
     val finishedSessions = remember(real, finishedAt) {
@@ -347,12 +450,12 @@ private fun HomeScreen(vm: AppViewModel, onSelect: (String) -> Unit) {
 
 @Composable
 private fun SectionHeader(title: String) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
     Text(
         title,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        style = MaterialTheme.typography.labelMedium,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
+        color = sem.textTertiary,
+        style = dev.dsh.remote.ui.theme.AppType.eyebrow(),
+        modifier = Modifier.padding(top = 18.dp, bottom = 8.dp),
     )
 }
 
@@ -362,74 +465,102 @@ private fun BalanceSummaryCard(vm: AppViewModel) {
     val apiKey by vm.deepseekApiKey.collectAsState()
     val info = balance?.balance_infos?.firstOrNull()
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
-            .padding(14.dp),
+    val scheme = MaterialTheme.colorScheme
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    dev.dsh.remote.ui.theme.GlassSurface(
+        tier = dev.dsh.remote.ui.theme.GlassTier.Card,
+        shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            DshIcon(DshIcons.Data, tint = MaterialTheme.colorScheme.primary, size = 18.dp)
-            Spacer(Modifier.width(6.dp))
-            Text(Strings.str("balance_title"), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = { vm.queryDeepseekBalance() }) { Text(Strings.str("refresh"), style = MaterialTheme.typography.labelSmall) }
-        }
-        Spacer(Modifier.height(6.dp))
-        when {
-            info != null -> {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                dev.dsh.remote.ui.theme.IconBadge(icon = DshIcons.Data, tint = scheme.primary, size = 26.dp)
+                Spacer(Modifier.width(10.dp))
                 Text(
-                    "${info.total_balance} ${info.currency}",
-                    color = MaterialTheme.colorScheme.onBackground,
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
+                    Strings.str("balance_title"),
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = scheme.onSurface,
                 )
-                Text(
-                    Strings.str("available", if ((info.total_balance.toDoubleOrNull() ?: 0.0) > 0.0) Strings.str("yes") else Strings.str("no")),
-                    color = MaterialTheme.colorScheme.secondary,
-                    style = MaterialTheme.typography.labelSmall,
+                Spacer(Modifier.weight(1f))
+                dev.dsh.remote.ui.theme.GlassPill(
+                    text = Strings.str("refresh"),
+                    onClick = { vm.queryDeepseekBalance() },
                 )
             }
-            apiKey.isBlank() -> Text(
-                Strings.str("api_key_not_set"),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            else -> Text(
-                Strings.str("tap_refresh"),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
+            Spacer(Modifier.height(10.dp))
+            when {
+                info != null -> {
+                    Text(
+                        "${info.total_balance} ${info.currency}",
+                        color = scheme.onSurface,
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Light,
+                    )
+                    Text(
+                        Strings.str(
+                            "available",
+                            if ((info.total_balance.toDoubleOrNull() ?: 0.0) > 0.0) Strings.str("yes") else Strings.str("no"),
+                        ),
+                        color = sem.success,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                apiKey.isBlank() -> Text(
+                    Strings.str("api_key_not_set"),
+                    color = sem.textTertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                else -> Text(
+                    Strings.str("tap_refresh"),
+                    color = sem.textTertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
 
 @Composable
 private fun NotificationCard(icon: Int, title: String, subtitle: String, unread: Boolean = false, onClick: () -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .clickable(onClick = onClick)
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+    val scheme = MaterialTheme.colorScheme
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    dev.dsh.remote.ui.theme.GlassSurface(
+        tier = dev.dsh.remote.ui.theme.GlassTier.Card,
+        shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+        onClick = onClick,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            DshIcon(icon, tint = MaterialTheme.colorScheme.primary, size = 16.dp)
-            Spacer(Modifier.width(6.dp))
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-            if (unread) {
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .background(MaterialTheme.colorScheme.tertiary, CircleShape),
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                dev.dsh.remote.ui.theme.IconBadge(
+                    icon = icon,
+                    tint = if (unread) scheme.primary else scheme.onSurfaceVariant,
+                    size = 26.dp,
                 )
-                Spacer(Modifier.width(4.dp))
-                Text(Strings.str("unread"), color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = scheme.onSurface,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (unread) {
+                    Spacer(Modifier.width(6.dp))
+                    Box(Modifier.size(7.dp).background(scheme.tertiary, CircleShape))
+                }
             }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                subtitle,
+                color = sem.textTertiary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(start = 36.dp),
+            )
         }
-        Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -447,12 +578,15 @@ private fun LoadingState(label: String) {
 @Composable
 private fun SidebarContent(
     vm: AppViewModel,
+    /** 收起侧边栏：抽屉展开后左上角那个侧边栏按钮就是它。 */
+    onCollapse: () -> Unit,
     onSelectSession: (String) -> Unit,
     onSelectSubagent: (String, String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenFiles: () -> Unit,
     onOpenSubagents: () -> Unit,
     onCreateWorkspace: () -> Unit,
+    onOpenPhone: () -> Unit = {},
 ) {
     val workspaces by vm.workspaces.collectAsState()
     val sessions by vm.sessions.collectAsState()
@@ -461,6 +595,18 @@ private fun SidebarContent(
     // `blank` marks a session the host created but nobody has written to yet — those
     // showed up as mystery "新建会话 · 98e8" rows after an update. A session is kept
     // when it is the one open right now, so creating one is still visible.
+    // 空会话(宿主刚建、还没人写过)也要显示。
+    //
+    // 早先这里按 `blank` 过滤,理由是"更新后会冒出莫名其妙的新建会话行"。但那让
+    // **Web 端刚建的会话在手机上完全消失** —— 建完切到手机,列表里找不到。
+    // 现在标题已有"新建会话 · 98e8"这样的占位名,不再像未知条目,所以照常显示;
+    // 归档的仍然隐藏。
+    // 列表只显示**有内容的、未归档的**会话。
+    //
+    // - `blank` = 宿主建了但还没有任何用户消息。刚点「新建会话」就冒出一行是噪音,
+    //   而且这类空壳会在宿主侧越积越多(我这边一次看到 40 多个)。
+    // - 归档的照旧隐藏。
+    // - 当前打开的那条始终保留:否则新建完点进去,它自己反而从列表里消失。
     val activeSessions = sessions.filter {
         it.sessionId !in archivedIds && (!it.blank || it.sessionId == currentId)
     }
@@ -470,13 +616,10 @@ private fun SidebarContent(
     var searchQuery by remember { mutableStateOf("") }
     var workspaceTarget by remember { mutableStateOf<WorkspaceView?>(null) }
     var workspaceRename by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var selectionMode by remember { mutableStateOf(false) }
     // Creating a session needs a confirmation: a stray tap in the drawer used to
     // create one silently, which showed up as a mysterious new conversation.
     var newPrompt by remember { mutableStateOf(false) }
     var newWs by remember { mutableStateOf<String?>(null) }
-    var selectedForDelete by remember { mutableStateOf(setOf<String>()) }
-    var confirmBatchDelete by remember { mutableStateOf(false) }
     var expandedParents by remember { mutableStateOf(setOf<String>()) }
 
     // Main conversations (exclude subagent children).
@@ -508,13 +651,35 @@ private fun SidebarContent(
         result
     }
 
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
+    val scheme = MaterialTheme.colorScheme
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    Column(
+        Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("DSH Remote", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 侧边栏按钮挪到展开后的抽屉顶部；在这里它的作用是收起。
+                // 顶栏那个按钮仍然负责"打开"，否则抽屉就没法打开了。
+                dev.dsh.remote.ui.theme.GlassIconButton(
+                    icon = DshIcons.PanelLeft,
+                    contentDescription = Strings.str("collapse_sidebar"),
+                    onClick = onCollapse,
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "DSH Remote",
+                    fontWeight = FontWeight.SemiBold,
+                    style = dev.dsh.remote.ui.theme.AppType.wordmark(18),
+                    color = scheme.onSurface,
+                )
+            }
             Row {
                 IconButton(onClick = { newWs = null; newPrompt = true }) {
                     DshIcon(DshIcons.NewChat, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = 20.dp, contentDescription = Strings.str("new_session"))
@@ -533,17 +698,6 @@ private fun SidebarContent(
                         dismissButton = {
                             androidx.compose.material3.TextButton(onClick = { newPrompt = false }) { Text("取消") }
                         },
-                    )
-                }
-                IconButton(onClick = {
-                    selectionMode = !selectionMode
-                    if (!selectionMode) selectedForDelete = emptySet()
-                }) {
-                    DshIcon(
-                        DshIcons.Trash,
-                        tint = if (selectionMode) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                        size = 20.dp,
-                        contentDescription = Strings.str("batch_delete"),
                     )
                 }
                 TextButton(onClick = onCreateWorkspace) {
@@ -566,32 +720,6 @@ private fun SidebarContent(
         )
         Spacer(Modifier.height(8.dp))
 
-        if (selectionMode) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    Strings.str("selected_items", selectedForDelete.size),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    enabled = selectedForDelete.isNotEmpty(),
-                    onClick = { confirmBatchDelete = true },
-                ) { Text(Strings.str("delete"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
-                TextButton(onClick = {
-                    selectionMode = false
-                    selectedForDelete = emptySet()
-                }) { Text(Strings.str("cancel"), style = MaterialTheme.typography.labelSmall) }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-
         Row(
             Modifier
                 .fillMaxWidth()
@@ -613,9 +741,26 @@ private fun SidebarContent(
                 .padding(horizontal = 10.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            DshIcon(DshIcons.Fish, tint = MaterialTheme.colorScheme.onSurface, size = 20.dp)
+            DshIcon(DshIcons.Fish, tint = scheme.onSurface, size = 20.dp)
             Spacer(Modifier.width(8.dp))
-            Text(Strings.str("subagents"), fontWeight = FontWeight.Medium)
+            Text(Strings.str("subagents"), fontWeight = FontWeight.Medium, color = scheme.onSurface)
+        }
+        // 手机操控：只在设置里打开总开关后出现，避免未启用的用户看到不可用入口。
+        val phoneEnabled by vm.phoneControl.collectAsState()
+        if (phoneEnabled) {
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenPhone)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                DshIcon(DshIcons.Data, tint = scheme.primary, size = 18.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("手机操控", fontWeight = FontWeight.Medium, color = scheme.onSurface)
+            }
         }
         Spacer(Modifier.height(8.dp))
 
@@ -662,18 +807,49 @@ private fun SidebarContent(
                 out.add(SideRow.Parent(s, hasChildren, expanded))
                 if (expanded) for (c in children) out.add(SideRow.Child(s.sessionId, c))
             }
+            // 时间戳在 remember 外面取。放在里面会被冻结在第一次组合的时刻,
+            // 于是"最近 3 分钟"永远按那一刻算,后来的新会话反而进不去。
+            val rowsNow = System.currentTimeMillis()
             val rows = remember(mainSessions, childrenByParent, workspaces, expandedParents) {
                 buildList {
+                    // 会话按最近活跃降序。宿主给的是 updatedAt 序,但分组是按
+                    // workspace 遍历的,组内组间都会乱 —— 新会话于是沉到底部,
+                    // 用户滑不到就以为"没显示"。
+                    val byRecent = mainSessions.sortedByDescending { it.updatedAt }
+                    // 归属判定:**先看 workspace 的 sessionIds,再看目录**。
+                    //
+                    // 宿主不一定把会话写进 workspace 的 sessionIds —— 有的会话只在
+                    // 某个目录下创建,却一直挂在"未分组"里,用户以为它没显示。而
+                    // 每个会话都带 cwd、每个 workspace 都带 path,按目录对得上就归位,
+                    // 只有目录也不匹配的才留在「其它」。
+                    fun workspaceOf(s: SessionSummary): WorkspaceView? {
+                        val byId = workspaces.firstOrNull { s.sessionId in it.sessionIds }
+                        if (byId != null) return byId
+                        val cwd = s.cwd?.trimEnd('\\', '/') ?: return null
+                        return workspaces.firstOrNull {
+                            val p = it.path.trimEnd('\\', '/')
+                            p.isNotEmpty() && p.equals(cwd, ignoreCase = true)
+                        }
+                    }
+                    val grouped = byRecent.map { s -> s to workspaceOf(s) }
+                    val orphans = grouped.filter { it.second == null }.map { it.first }
+                    // 最近活跃的孤儿提前,免得沉到 100 多条列表的底部。
+                    val (fresh, restOrphans) = orphans.partition { rowsNow - it.updatedAt < 3 * 60 * 1000L }
+                    if (fresh.isNotEmpty()) {
+                        add(SideRow.Header("orphans-fresh", null))
+                        fresh.forEach { s -> addBranch(this, s) }
+                    }
                     for (ws in workspaces) {
-                        val wsSessions = mainSessions.filter { it.sessionId in ws.sessionIds }
+                        val wsSessions = grouped
+                            .filter { it.second?.workspaceId == ws.workspaceId }
+                            .map { it.first }
                         if (wsSessions.isEmpty()) continue
                         add(SideRow.Header("ws-${ws.workspaceId}", ws))
                         wsSessions.forEach { s -> addBranch(this, s) }
                     }
-                    val orphans = mainSessions.filter { s -> workspaces.none { ws -> s.sessionId in ws.sessionIds } }
-                    if (orphans.isNotEmpty()) {
+                    if (restOrphans.isNotEmpty()) {
                         add(SideRow.Header("orphans", null))
-                        orphans.forEach { s -> addBranch(this, s) }
+                        restOrphans.forEach { s -> addBranch(this, s) }
                     }
                 }
             }
@@ -681,12 +857,20 @@ private fun SidebarContent(
                 items(rows, key = { it.key }) { row ->
                     when (row) {
                         is SideRow.Header -> {
-                            if (row.workspace != null) WorkspaceHeader(
-                                row.workspace,
-                                onLongClick = { workspaceTarget = row.workspace },
-                                onNewSession = { newWs = row.workspace.workspaceId; newPrompt = true },
-                            )
-                            else Text(Strings.str("other"), style = MaterialTheme.typography.labelMedium)
+                            if (row.workspace != null) {
+                                WorkspaceHeader(
+                                    row.workspace,
+                                    onLongClick = { workspaceTarget = row.workspace },
+                                    onNewSession = { newWs = row.workspace.workspaceId; newPrompt = true },
+                                )
+                            } else {
+                                val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+                                Text(
+                                    if (row.key == "orphans-fresh") "最近" else Strings.str("other"),
+                                    style = dev.dsh.remote.ui.theme.AppType.eyebrow(color = sem.textTertiary),
+                                    modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                                )
+                            }
                         }
                         is SideRow.Parent -> {
                             SessionRow(
@@ -695,11 +879,6 @@ private fun SidebarContent(
                                 selected = row.session.sessionId == currentId,
                                 onClick = { onSelectSession(row.session.sessionId) },
                                 onLongClick = { sessionMenuTarget = row.session.sessionId to row.session.title },
-                                selectionMode = selectionMode,
-                                checked = row.session.sessionId in selectedForDelete,
-                                onToggleSelect = {
-                                    selectedForDelete = if (row.session.sessionId in selectedForDelete) selectedForDelete - row.session.sessionId else selectedForDelete + row.session.sessionId
-                                },
                                 hasChildren = row.hasChildren,
                                 expanded = row.expanded,
                                 onToggleExpand = if (row.hasChildren) {
@@ -785,25 +964,6 @@ private fun SidebarContent(
             onDismiss = { workspaceRename = null },
         )
     }
-
-    if (confirmBatchDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmBatchDelete = false },
-            title = { Text(Strings.str("batch_delete")) },
-            text = { Text(Strings.str("confirm_batch_delete", selectedForDelete.size)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmBatchDelete = false
-                    selectedForDelete.forEach { vm.deleteSessionById(it) }
-                    selectedForDelete = emptySet()
-                    selectionMode = false
-                }) { Text(Strings.str("delete"), color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmBatchDelete = false }) { Text(Strings.str("cancel")) }
-            },
-        )
-    }
 }
 
 @Composable
@@ -869,31 +1029,28 @@ private fun SessionRow(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    selectionMode: Boolean = false,
-    checked: Boolean = false,
-    onToggleSelect: () -> Unit = {},
     hasChildren: Boolean = false,
     expanded: Boolean = false,
     onToggleExpand: (() -> Unit)? = null,
     pendingInteraction: String? = null,
 ) {
+    val scheme = MaterialTheme.colorScheme
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(vertical = 1.dp)
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .background(
+                if (selected) scheme.primary.copy(alpha = 0.12f) else androidx.compose.ui.graphics.Color.Transparent,
+            )
             .combinedClickable(
-                onClick = { if (selectionMode) onToggleSelect() else onClick() },
+                onClick = onClick,
                 onLongClick = onLongClick,
             )
-            .background(
-                if (selected) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
-            )
-            .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            .padding(start = 8.dp, end = 8.dp, top = 9.dp, bottom = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (selectionMode) {
-            Checkbox(checked = checked, onCheckedChange = { onToggleSelect() })
-            Spacer(Modifier.width(4.dp))
-        }
         if (onToggleExpand != null) {
             DshIcon(
                 if (expanded) DshIcons.ChevronDown else DshIcons.ChevronRight,
@@ -916,7 +1073,9 @@ private fun SessionRow(
             title,
             maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            fontWeight = FontWeight.Medium,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) scheme.primary else scheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f),
         )
     }

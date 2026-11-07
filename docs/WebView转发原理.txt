@@ -1,0 +1,163 @@
+DSH Remote —— WebView 转发原理说明
+================================================================
+
+版本：1.6.25 (versionCode 213)
+适用范围：Android App「DSH Remote」内嵌的 Web 界面（设置面板 / Web UI）
+
+
+一、整体链路（一句话）
+----------------------------------------------------------------
+WebView  →  手机本地代理 NanoHTTPD:3086  →  Caddy(:8080/:8443)  →  dsh 宿主(:3080 或 :3084)
+
+WebView 只负责发 HTTP 请求；真正的转发、鉴权、缓存、内容改写全部由
+手机里那个本地代理进程完成。
+
+
+二、为什么不能直接用 WebView 拦截
+----------------------------------------------------------------
+WebView 的 shouldInterceptRequest 只暴露 GET 的 URL，
+**拿不到 POST 请求体**。
+
+而 dsh 的每一个 RPC（session.list / workspace.list / settings.describe …）
+都是 POST + JSON body。用拦截 = 所有功能失效。
+
+所以改成：在手机进程内起一个本地 HTTP 服务器（NanoHTTPD），
+WebView 的 URL 指向 http://127.0.0.1:3086，由这个服务器去连宿主。
+
+实现文件：app/src/main/java/dev/dsh/remote/net/WebProxyServer.kt
+监听地址：127.0.0.1:3086（只回环，局域网访问不到）
+
+
+三、serve() 的两条分流
+----------------------------------------------------------------
+① 静态资源 → 本地磁盘缓存
+
+   条件：方法为 GET，且扩展名在 STATIC_EXT 白名单内
+   白名单：js css woff woff2 ttf svg png jpg ico map
+   例外："/" 和 *.html 永不缓存（必须每次回源，才能拿到新版本的资源引用）
+
+   命中时直接 newChunkedResponse 吐磁盘文件，不产生任何网络请求。
+
+   缓存路径：cacheDir / <uri 去掉查询串与前导斜杠>
+   例如 /assets/index-5SrrfWpU.js
+        → <cacheDir>/assets/index-5SrrfWpU.js
+
+② 其余全部 → 转发给宿主
+
+   目标地址 = upstream + uri + (query 非空时 "?" + query)
+
+   上游 upstream 就是用户配置的服务器地址，例如
+   http://100.117.219.91:8080
+
+
+四、转发时对请求做的处理
+----------------------------------------------------------------
+1) 请求体
+   NanoHTTPD 不会自动解包，必须手工：
+     session.parseBody(files)
+     files["postData"]            ← 原始请求体字节
+   POST/PUT 才带；GET 传 null。
+
+2) 请求头逐个复制，但**主动丢弃**下面几个：
+     host             —— 必须由 OkHttp 按目标地址重算
+     content-length   —— body 变了，长度要重算
+     connection       —— 逐跳头，不能透传
+     accept-encoding  —— 见第 6 条
+     user-agent       —— 见第 3 条
+
+3) user-agent 必须伪装成浏览器（BROWSER_UA，硬编码 Chrome UA）
+   原因：Caddy 按 UA 分流
+     User-Agent 含 okhttp  →  转发到 :3084（旧协议桥，给原生 App 用）
+     其余                  →  转发到 :3080（原生 0.2.x 宿主）
+   若这里透传 okhttp，所有 RPC 会被按"旧协议客户端"翻译，结果全错。
+
+4) 鉴权不由 App 负责
+   dsh 的 /api 有两道关：Host 必须是回环 + 浏览器 session cookie。
+   Caddy 侧统一改写 Host、注入已签名的 cookie，
+   所以手机端不需要复刻任何登录逻辑。
+
+5) 只监听 127.0.0.1
+   端口不对局域网开放；外部不可访问。
+
+
+五、对响应做的三件事
+----------------------------------------------------------------
+1) 读取完整字节流，再回给 WebView（不是边收边转，为了下面两步加工）
+
+2) HTML 注入
+   判断：uri 为 "/" 或 以 .html 结尾，或响应头 content-type 含 text/html
+   动作：若页面里还没有 "dsh-panel-fit" 标记，
+        在 </body> 前注入 PANEL_JS 脚本
+
+   PANEL_JS 干的事：dsh 的设置界面在桌面端是浮在整个 SPA 上的模态框，
+   手机上背后那层页面没用、还会把布局撑得很宽导致字体极小。
+   这段脚本把弹窗拉满视口、去掉遮罩、给左侧导航固定 118px 窄列，
+   于是面板看起来就像一个原生设置页。
+
+3) 缓存回填
+   GET + 白名单扩展名 + 响应成功 + 字节非空  →  写回磁盘缓存
+   下次打开直接从磁盘读。
+
+
+六、关于 accept-encoding 的取舍
+----------------------------------------------------------------
+主动丢掉 accept-encoding，让 OkHttp 自己协商 gzip 并透明解压。
+好处：落盘的是解压后的字节，可直接当文件用；
+     线路上传输量从约 1.5 MB 降到约 489 KB
+     —— 通过 Tailscale 中继（DERP）时，这是"面板能打开"和
+        "看起来根本连不上宿主"的区别。
+
+
+七、超时与失败
+----------------------------------------------------------------
+OkHttp 客户端（Tls.kt → TrustAll.client()）配置：
+  connectTimeout        15s
+  readTimeout          300s   （面板加载慢、宿主忙时给足时间）
+  writeTimeout          60s
+  pingInterval          25s
+  retryOnConnectionFailure = true
+
+TLS 采用自签名信任（TrustAll）：面向个人自建 Caddy，
+服务器地址由用户显式配置、且走私有 Tailscale 网络，故不校验证书链。
+
+
+八、这条链路和"下载文件到手机"不是同一件事
+----------------------------------------------------------------
+WebView 只发 HTTP，它自己没有写手机存储的能力。
+本 App 把文件落到手机上走的是另一条原生路径：
+
+  首选  MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        insert 一条记录：
+          DISPLAY_NAME  = 文件名
+          RELATIVE_PATH = Download/<downloadDir>
+        然后用返回的 contentResolver URI 写入字节
+        → 文件对系统文件管理器、其他 App 可见
+
+  兜底  MediaStore 拒绝某些文件名/类型时，
+        退到应用私有外部目录 getExternalFilesDir()/<downloadDir>
+
+  可选  用户在设置里选过 SAF 目录（downloadTree）时，
+        走 SAF 的 DocumentFile 写到那个 URI（权限持久化）
+
+  收尾  提示「下载完成：下载/DSHRemote/<文件名>」
+
+
+九、涉及的文件
+----------------------------------------------------------------
+  net/WebProxyServer.kt    本地代理：分流、转发、HTML 注入、缓存
+  net/Tls.kt               单例 OkHttpClient（自签名信任 + UA 约定）
+  net/WsClient.kt          事件流（WebSocket，/api/events.mux、events.host）
+  ui/RemoteViewScreen.kt   WebView 容器与加载状态
+  ui/WebSettingsScreen.kt  设置面板入口
+  ui/AppViewModel.kt       downloadWorkspaceFile() 等落盘逻辑
+  net/RpcClient.kt         原生 RPC（不走 WebView，走 /api/<method>）
+
+
+十、要点速记
+----------------------------------------------------------------
+  · 拦截做不到（POST body 拿不到）→ 用本地 HTTP 服务器代转
+  · UA 必须伪装浏览器，否则 Caddy 分流到旧协议桥
+  · cookie 由 Caddy 注入，App 不碰鉴权
+  · 静态走磁盘缓存，HTML 不缓存
+  · HTML 回程注入 PANEL_JS 适配手机视口
+  · 下载落盘走 MediaStore，与 WebView 无关

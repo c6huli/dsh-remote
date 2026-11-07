@@ -68,3 +68,16 @@ fun toolKindOf(name: String): ToolKind {
         else -> ToolKind.Other
     }
 }
+/**
+ * 工具类别 → 语义色调。界面取色一律走 [DshSemanticColors.tool],不在业务代码里
+ * 写死颜色:同一张 `bash` 行在六套配色下必须长得一样,但底色的深浅要跟主题走。
+ */
+fun toolToneOf(kind: ToolKind): dev.dsh.remote.ui.theme.ToolTone = when (kind) {
+    ToolKind.Shell -> dev.dsh.remote.ui.theme.ToolTone.Terminal
+    ToolKind.Edit -> dev.dsh.remote.ui.theme.ToolTone.Edit
+    ToolKind.Read -> dev.dsh.remote.ui.theme.ToolTone.Read
+    ToolKind.Web -> dev.dsh.remote.ui.theme.ToolTone.Web
+    ToolKind.Task -> dev.dsh.remote.ui.theme.ToolTone.Plan
+    ToolKind.Media -> dev.dsh.remote.ui.theme.ToolTone.Search
+    ToolKind.Other -> dev.dsh.remote.ui.theme.ToolTone.Neutral
+}

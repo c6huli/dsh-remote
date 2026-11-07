@@ -389,9 +389,28 @@ sealed class ChatItem {
         val diffNew: String? = null,
     ) : ChatItem()
     data class Meta(val text: String, val seq: Long = 0) : ChatItem()
+    /**
+     * A host-injected notice that carries a large payload (e.g. a compaction
+     * checkpoint, the skill catalog, or a runtime-context snapshot). Rendered as
+     * a single collapsible line instead of dumping the whole wall of text into
+     * the transcript.
+     */
+    data class SystemDetail(val label: String, val text: String, val seq: Long = 0) : ChatItem()
     data class Cost(val text: String, val seq: Long = 0) : ChatItem()
     data class Todo(val items: List<TodoItem>) : ChatItem()
     data class Deliverables(val paths: List<String>) : ChatItem()
+    /**
+     * A failed model request / failed turn, surfaced so the failure content is
+     * actually visible in the transcript (the host only reports it inside the
+     * `turn/end` reason).
+     */
+    data class Error(
+        val message: String,
+        val code: String = "",
+        val status: Int = 0,
+        val requestId: String = "",
+        val seq: Long = 0,
+    ) : ChatItem()
 }
 
 @Serializable
@@ -469,6 +488,27 @@ fun toolResultText(data: JsonObject): String {
     return textOf(block["content"])
 }
 
+/**
+ * Extract a failed-turn marker (模型请求失败) from a `turn/end` event payload.
+ * The host embeds the failure as `reason.kind == "error"` with the structured
+ * [LlmFailure](message/code/status/requestId) under `reason.error`. Returns
+ * null when the turn ended normally, was aborted, hit max-tokens, etc.
+ */
+fun turnEndErrorOf(data: JsonObject, seq: Long = 0): ChatItem.Error? {
+    val reason = data["reason"]?.jsonObject ?: return null
+    if (reason["kind"]?.jsonPrimitive?.content != "error") return null
+    val err = reason["error"]?.jsonObject ?: return null
+    val message = err["message"]?.jsonPrimitive?.content
+        ?: reason["message"]?.jsonPrimitive?.content ?: return null
+    return ChatItem.Error(
+        message = message,
+        code = err["code"]?.jsonPrimitive?.content ?: "",
+        status = err["status"]?.jsonPrimitive?.intOrNull ?: 0,
+        requestId = err["requestId"]?.jsonPrimitive?.content ?: "",
+        seq = seq,
+    )
+}
+
 /** One-line collapsed summary of the reasoning (first non-empty line, truncated). */
 fun reasoningSummaryOf(content: JsonElement?): String {
     if (content !is JsonArray) return ""
@@ -485,6 +525,24 @@ fun reasoningSummaryOf(content: JsonElement?): String {
 
 /** Max chars of tool args/result kept in chat items (full text stays in raw events). */
 private const val MAX_TOOL_TEXT = 8000
+
+/**
+ * Host-injected `user/message` payloads longer than this are collapsible system
+ * notices instead of full rendered text. Keeps compaction checkpoints, the
+ * skill catalog, runtime-context snapshots etc. from flooding the transcript.
+ */
+private const val SYSTEM_NOTICE_MAX_CHARS = 500
+
+/** Short human label for a host-injected message source kind. */
+private fun labelOf(kind: String): String = when (kind) {
+    "compact-checkpoint" -> Strings.str("sys_compaction")
+    "skill-catalog" -> Strings.str("sys_skill_catalog")
+    "runtime-context" -> Strings.str("sys_runtime_context")
+    "model-selection" -> Strings.str("sys_model_notice")
+    "subagent-settled" -> Strings.str("sys_subagent_done")
+    "agent-message" -> Strings.str("sys_agent_message")
+    else -> Strings.str("sys_system")
+}
 
 /** Extract (card, summary) from a host-computed tool view, or null if not a tool view. */
 fun toolViewInfo(view: JsonElement?): Pair<String, String>? {
@@ -576,9 +634,17 @@ fun foldChat(events: List<SessionEvent>, viewBySeq: Map<Long, JsonElement> = emp
                     } else {
                         // Host/plugin notices (e.g. "background job … finished") are not
                         // the user's words — show them as a subtle system line instead of
-                        // a user bubble.
+                        // a user bubble. Large host-injected payloads (compaction
+                        // checkpoints, the skill catalog, runtime-context snapshots)
+                        // must not be dumped as a giant unformatted blob, so they are
+                        // collapsed into a single tappable line.
                         val summary = source?.get("summary")?.jsonPrimitive?.content
-                        out.add(ChatItem.Meta(summary?.takeIf { it.isNotBlank() } ?: text, ev.seq))
+                        val sourceText = summary?.takeIf { it.isNotBlank() } ?: text
+                        if (sourceText.length > SYSTEM_NOTICE_MAX_CHARS) {
+                            out.add(ChatItem.SystemDetail(labelOf(kind), sourceText, ev.seq))
+                        } else if (sourceText.isNotBlank()) {
+                            out.add(ChatItem.Meta(sourceText, ev.seq))
+                        }
                     }
                 }
             }
@@ -653,8 +719,27 @@ fun foldChat(events: List<SessionEvent>, viewBySeq: Map<Long, JsonElement> = emp
                 } ?: emptyList()
                 if (todos.isNotEmpty()) out.add(ChatItem.Todo(todos))
             }
+            // `present`-ed files are durable deliverable references the host records
+            // in their own event; keep them so the turn's deliverable card includes
+            // APKs/zips the producing tool never reported as a diff.
+            "deliverables/presented" -> {
+                pendingCall?.let { out.add(it) }; pendingCall = null
+                val files = ev.data["files"] as? JsonArray
+                if (files != null) {
+                    for (f in files) {
+                        val p = (f as? JsonObject)?.get("path")?.jsonPrimitive?.content
+                        if (!p.isNullOrBlank()) produced.add(p)
+                    }
+                }
+            }
             "turn/end" -> {
                 pendingCall?.let { out.add(it) }; pendingCall = null
+                // A failed turn carries the failure inside reason.kind == "error",
+                // with the LlmFailure under reason.error. Surface it so the failure
+                // content actually reaches the transcript instead of vanishing.
+                turnEndErrorOf(ev.data, ev.seq).let { err ->
+                    if (err != null) out.add(err)
+                }
                 // Mark the final assistant message of this turn as the turn end,
                 // so fork / copy actions render only after the turn's last output.
                 val lastAssistant = out.indexOfLast { it is ChatItem.Assistant }

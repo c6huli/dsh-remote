@@ -59,6 +59,11 @@ object DshIcons {
     val Dark = R.drawable.dsh_ic_dark_outline16
     val FollowSystem = R.drawable.dsh_ic_followsystem_outline16
     val Fish = R.drawable.dsh_brand_fish
+
+    /** 文件卡用的图标:改动文件 / 交付箱 / ZIP 包。 */
+    val FileAdd = R.drawable.dsh_ic_file_add_outline16
+    val Box = R.drawable.dsh_ic_box_outline16
+    val FileZip = R.drawable.dsh_ic_file_zip_outline16
 }
 
 @Composable

@@ -28,6 +28,34 @@ object TrustAll {
     }
 
     /**
+     * Pre-build the SSL context on a background thread.
+     *
+     * `SSLContext.init` with a fresh [SecureRandom] can take hundreds of ms —
+     * occasionally seconds on a cold boot with a starved entropy pool. It used to
+     * run synchronously on the main thread (viewModelScope launches inline up to
+     * the first suspension, and the first thing the startup path did was build a
+     * client), which left the window blank with no frame drawn: the "sometimes
+     * white/black screen on launch".
+     *
+     * Warms it once, off the main thread, so the first real call is a cache hit.
+     */
+    fun warmUpAsync() {
+        if (warmed) return
+        warmed = true
+        runCatching {
+            Thread({
+                runCatching { sslSocketFactory }
+            }, "dsh-tls-warmup").apply {
+                isDaemon = true
+                priority = Thread.MIN_PRIORITY
+            }.start()
+        }
+    }
+
+    @Volatile
+    private var warmed = false
+
+    /**
      * Keep OkHttp's default `okhttp/x.y` User-Agent on purpose.
      *
      * Caddy routes anything matching `okhttp` to the protocol bridge on :3084,

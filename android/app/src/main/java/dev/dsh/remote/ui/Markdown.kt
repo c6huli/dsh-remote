@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -51,11 +52,44 @@ import dev.dsh.remote.ui.icons.DshIcon
 import dev.dsh.remote.ui.icons.DshIcons
 import dev.dsh.remote.ui.theme.DshGreen
 
-private val C_KEYWORD = Color(0xFFC678DD)
-private val C_STRING = Color(0xFF98C379)
-private val C_COMMENT = Color(0xFF7F848E)
-private val C_NUMBER = Color(0xFFD19A66)
-private val C_LINK = Color(0xFF5EA1F0)
+/**
+ * 语法高亮色。
+ *
+ * 原值是 One Dark 那套(只适合深色底):浅色代码井上,0xFF98C379 这种绿对
+ * #EDF0F6 只有 1.8:1,根本看不清。所以浅深各一套,由代码井的亮度选择 —— 保证
+ * 每一种高亮色对井底都 ≥ 4.5:1。
+ */
+private data class CodePalette(
+    val keyword: Color,
+    val string: Color,
+    val comment: Color,
+    val number: Color,
+    val link: Color,
+)
+
+private val CodeDark = CodePalette(
+    keyword = Color(0xFFC678DD),
+    string = Color(0xFF98C379),
+    comment = Color(0xFF8B9099),
+    number = Color(0xFFD19A66),
+    link = Color(0xFF5EA1F0),
+)
+
+private val CodeLight = CodePalette(
+    keyword = Color(0xFF7B3FA0),
+    string = Color(0xFF1F6B33),
+    comment = Color(0xFF5C6270),
+    number = Color(0xFF8A4B10),
+    link = Color(0xFF1D5FA8),
+)
+
+private fun codePaletteFor(background: Color): CodePalette =
+    if (background.luminance() < 0.5f) CodeDark else CodeLight
+
+private fun Color.luminance(): Float {
+    fun lin(v: Float): Float = if (v <= 0.03928f) v / 12.92f else Math.pow(((v + 0.055) / 1.055).toDouble(), 2.4).toFloat()
+    return 0.2126f * lin(red) + 0.7152f * lin(green) + 0.0722f * lin(blue)
+}
 
 private val KEYWORDS = setOf(
     "if", "else", "for", "while", "return", "function", "fun", "class", "def", "import",
@@ -138,12 +172,16 @@ private fun parseRow(line: String): List<String> =
 @Composable
 private fun CodeBlock(code: String, color: Color) {
     val context = LocalContext.current
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val wellFg = sem.codeWellFg
+    val palette = remember(sem.codeWellBg) { codePaletteFor(sem.codeWellBg) }
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
-            .padding(8.dp),
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+            .background(dev.dsh.remote.ui.theme.LocalDshSemantic.current.codeWellBg)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Spacer(Modifier.weight(1f))
@@ -156,15 +194,15 @@ private fun CodeBlock(code: String, color: Color) {
             }
         }
         Text(
-            text = remember(code) { highlightCode(code, color) },
+            text = remember(code, palette) { highlightCode(code, palette) },
             fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall,
+            style = dev.dsh.remote.ui.theme.AppType.monoSmall(color = wellFg),
             modifier = Modifier.fillMaxWidth(),
         )
     }
 }
 
-private fun highlightCode(code: String, base: Color): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
+private fun highlightCode(code: String, palette: CodePalette): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
     var i = 0
     val n = code.length
     while (i < n) {
@@ -178,37 +216,37 @@ private fun highlightCode(code: String, base: Color): androidx.compose.ui.text.A
                     i++
                 }
                 if (i < n) i++
-                withStyle(SpanStyle(color = C_STRING)) { append(code.substring(start, i)) }
+                withStyle(SpanStyle(color = palette.string)) { append(code.substring(start, i)) }
             }
             c == '/' && i + 1 < n && code[i + 1] == '/' -> {
                 val start = i
                 while (i < n && code[i] != '\n') i++
-                withStyle(SpanStyle(color = C_COMMENT)) { append(code.substring(start, i)) }
+                withStyle(SpanStyle(color = palette.comment)) { append(code.substring(start, i)) }
             }
             c == '/' && i + 1 < n && code[i + 1] == '*' -> {
                 val start = i
                 i += 2
                 while (i + 1 < n && !(code[i] == '*' && code[i + 1] == '/')) i++
                 if (i + 1 < n) i += 2
-                withStyle(SpanStyle(color = C_COMMENT)) { append(code.substring(start, i)) }
+                withStyle(SpanStyle(color = palette.comment)) { append(code.substring(start, i)) }
             }
             c == '#' -> {
                 val start = i
                 while (i < n && code[i] != '\n') i++
-                withStyle(SpanStyle(color = C_COMMENT)) { append(code.substring(start, i)) }
+                withStyle(SpanStyle(color = palette.comment)) { append(code.substring(start, i)) }
             }
             c.isDigit() -> {
                 val start = i
                 while (i < n && (code[i].isDigit() || code[i] == '.' || code[i] == 'x' ||
                         code[i] in 'a'..'f' || code[i] in 'A'..'F')) i++
-                withStyle(SpanStyle(color = C_NUMBER)) { append(code.substring(start, i)) }
+                withStyle(SpanStyle(color = palette.number)) { append(code.substring(start, i)) }
             }
             c.isLetter() || c == '_' -> {
                 val start = i
                 while (i < n && (code[i].isLetterOrDigit() || code[i] == '_')) i++
                 val word = code.substring(start, i)
                 if (word in KEYWORDS) {
-                    withStyle(SpanStyle(color = C_KEYWORD, fontWeight = FontWeight.SemiBold)) { append(word) }
+                    withStyle(SpanStyle(color = palette.keyword, fontWeight = FontWeight.SemiBold)) { append(word) }
                 } else {
                     append(word)
                 }
@@ -225,7 +263,8 @@ private fun TableBlock(table: MdTable, color: Color) {
         Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f))
             .padding(8.dp),
     ) {
         allRows.forEachIndexed { rowIdx, row ->
@@ -290,7 +329,9 @@ private fun InlineText(text: String, color: Color, style: TextStyle, modifier: M
     // Inline code renders as a clearly-visible grey box; the background follows
     // text wrapping (so long paths wrap to the next line instead of overflowing).
     val codeBg = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
-    val annotated = remember(text, codeBg) {
+    // 链接色跟着正文底色选:浅底用深蓝,深底用亮蓝,都保证 ≥ 4.5:1。
+    val linkColor = if (color.luminance() > 0.5f) CodeLight.link else CodeDark.link
+    val annotated = remember(text, codeBg, linkColor) {
         buildAnnotatedString {
             val boldRe = Regex("\\*\\*(.+?)\\*\\*")
             val codeRe = Regex("`([^`]+)`")
@@ -310,8 +351,8 @@ private fun InlineText(text: String, color: Color, style: TextStyle, modifier: M
                 when (kind) {
                     0 -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(m.groupValues[1]) }
                     1 -> withStyle(SpanStyle(background = codeBg)) { append(m.groupValues[1]) }
-                    2 -> withLink(LinkAnnotation.Url(m.groupValues[2])) { withStyle(SpanStyle(color = C_LINK)) { append(m.groupValues[1]) } }
-                    3 -> withLink(LinkAnnotation.Url(m.groupValues[2])) { withStyle(SpanStyle(color = C_LINK)) { append(m.groupValues[1].ifBlank { Strings.str("image") }) } }
+                    2 -> withLink(LinkAnnotation.Url(m.groupValues[2])) { withStyle(SpanStyle(color = linkColor)) { append(m.groupValues[1]) } }
+                    3 -> withLink(LinkAnnotation.Url(m.groupValues[2])) { withStyle(SpanStyle(color = linkColor)) { append(m.groupValues[1].ifBlank { Strings.str("image") }) } }
                 }
                 i = m.range.last + 1
             }

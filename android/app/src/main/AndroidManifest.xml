@@ -8,6 +8,16 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- 手机操控（设置里开关，默认关闭）：Shizuku 以 shell 身份跑我们的 UserService，
+         由它执行固定的几条命令（截图 / 点按 / 输入 / 返回桌面…）。这里不需要任何
+         危险权限：WRITE_SECURE_SETTINGS 之类的权限都由 shell 侧的 UserService 持有。 -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+    <!-- 手机操控的悬浮「紧急停止」按钮：只在一条指令执行期间显示，执行完/点一下就消失。
+         单个 VIEW 悬浮窗，没有无障碍服务，也不在后台抓屏。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <!-- Android 11+ package visibility: without this, queryIntentActivities returns
          nothing and "open with" looks broken even when handlers exist. -->
     <queries>
@@ -41,6 +51,14 @@
             </intent-filter>
         </activity>
 
+        <!-- 手机操控：Shizuku 把 shell 侧 Binder 通过这个 provider 交回本进程。 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="dev.dsh.remote.fileprovider"
@@ -55,6 +73,16 @@
             android:name=".service.DshForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 指令执行期间的悬浮「紧急停止」 -->
+        <service
+            android:name=".phone.PhoneStopOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Floating emergency-stop button while a typed phone instruction runs" />
+        </service>
     </application>
 
 </manifest>

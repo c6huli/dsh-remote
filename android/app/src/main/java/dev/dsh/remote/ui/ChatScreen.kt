@@ -49,6 +49,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TextField
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -102,8 +105,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import dev.dsh.remote.ui.icons.DshIcon
 import dev.dsh.remote.ui.icons.DshIcons
+import dev.dsh.remote.ui.theme.pressableClick
 import dev.dsh.remote.ui.theme.DshAmber
-import dev.dsh.remote.ui.theme.DshGreen
 import dev.dsh.remote.ui.theme.DshGreen
 import dev.dsh.remote.ui.theme.DshRed
 import dev.dsh.remote.ui.theme.DshUserText
@@ -125,6 +128,7 @@ fun ChatScreen(
     ChatFiles.confirm = { f -> pendingFile = f }
     // Download runs off the UI thread; the view model owns the coroutine scope.
     ChatFiles.download = { p -> vm.scopeDownload(p) }
+    ChatFiles.copyPath = { p -> vm.copyText(p) }
     val models by vm.models.collectAsState()
     val streaming by vm.streaming.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
@@ -211,20 +215,33 @@ fun ChatScreen(
     Column(modifier.fillMaxSize().imePadding()) {
         // Consecutive tool calls are folded into one block, so a turn reads as
         // "a few steps then the answer" instead of an endless column of cards.
+        // 文件卡的「查看改动」按路径找回 diff,所以先登记本轮所有带 diff 的工具调用。
+        remember(chatItems) {
+            ChatDiffRegistry.reset()
+            chatItems.forEach { if (it is ChatItem.Tool) ChatDiffRegistry.register(it) }
+            true
+        }
         val rows = remember(chatItems) { groupToolSteps(chatItems) }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             ) {
                 if (loadingOlder) {
                     item(key = "loading-older") {
                         Text(Strings.str("load_earlier"), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                items(rows) { row ->
+                // 最后一张过程卡才显示"执行中":历史轮的卡片早已结束。
+                val lastProcessIndex = rows.indexOfLast { it is ChatRow.Process }
+                itemsIndexed(rows) { index, row ->
                     when (row) {
+                        is ChatRow.Process -> TurnProcessCard(
+                            items = row.items,
+                            running = running && index == lastProcessIndex,
+                            fullReasoning = vm::fullReasoning,
+                        )
                         is ChatRow.Tools -> ToolGroupCard(row.items, running)
                         is ChatRow.Files -> TurnFilesCard(row.files)
                         is ChatRow.Single -> ChatRow(
@@ -266,20 +283,23 @@ fun ChatScreen(
                 }
             }
             if (showJumpToBottom) {
-                IconButton(
-                    onClick = { scope.launch { listState.scrollToBottom() } },
+                dev.dsh.remote.ui.theme.GlassSurface(
+                    tier = dev.dsh.remote.ui.theme.GlassTier.Chrome,
+                    shape = CircleShape,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(12.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
                         .size(40.dp),
+                    onClick = { scope.launch { listState.scrollToBottom() } },
                 ) {
-                    DshIcon(
-                        DshIcons.ChevronDown,
-                        tint = MaterialTheme.colorScheme.primary,
-                        size = 20.dp,
-                        contentDescription = Strings.str("jump_bottom"),
-                    )
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        DshIcon(
+                            DshIcons.ChevronDown,
+                            tint = MaterialTheme.colorScheme.primary,
+                            size = 20.dp,
+                            contentDescription = Strings.str("jump_bottom"),
+                        )
+                    }
                 }
             }
         }
@@ -474,32 +494,37 @@ private fun ReasoningBox(
 ) {
     var expanded by remember { mutableStateOf(initiallyExpanded) }
     var fullText by remember { mutableStateOf<String?>(null) }
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    // 折叠动画:高度变化走 animateContentSize,慢一拍才不"咔"一下。
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable {
+            .padding(vertical = 2.dp)
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .background(scheme.onSurface.copy(alpha = 0.04f))
+            .pressableClick(onClick = {
                 expanded = !expanded
                 if (expanded) {
                     if (fullText == null) fullText = fullProvider()
                     onExpanded()
                 }
-            }
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            })
+            .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            DshIcon(DshIcons.Think, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = 14.dp)
-            Spacer(Modifier.width(4.dp))
+            DshIcon(DshIcons.Think, tint = sem.textTertiary, size = 14.dp)
+            Spacer(Modifier.width(6.dp))
             Text(
                 Strings.str("reasoning"),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = sem.textTertiary,
                 style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
+                fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.weight(1f))
             Text(
                 if (expanded) Strings.str("collapse") else Strings.str("expand"),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = sem.textTertiary,
                 style = MaterialTheme.typography.labelSmall,
             )
             DshIcon(
@@ -518,7 +543,7 @@ private fun ReasoningBox(
             ) {
                 Text(
                     fullText ?: summary,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = scheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -742,19 +767,29 @@ private fun ChatRow(
 ) {
     when (item) {
         is ChatItem.User -> {
+            // 用户气泡:比页面深一档的主色系,像轻轻按进纸里的一块(不是纯色块)。
+            val surfaces = dev.dsh.remote.ui.theme.LocalDshSurfaces.current
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.End,
             ) {
                 Box(
                     Modifier
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f), RoundedCornerShape(14.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clip(
+                            RoundedCornerShape(
+                                topStart = dev.dsh.remote.ui.theme.AppShape.lg,
+                                topEnd = dev.dsh.remote.ui.theme.AppShape.lg,
+                                bottomEnd = dev.dsh.remote.ui.theme.AppShape.xs,
+                                bottomStart = dev.dsh.remote.ui.theme.AppShape.lg,
+                            ),
+                        )
+                        .background(surfaces.userBubble)
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
                         .widthIn(max = 320.dp),
                 ) {
                     Column {
                         if (item.text.isNotBlank()) {
-                            MarkdownText(item.text, color = DshUserText)
+                            MarkdownText(item.text, color = surfaces.onUserBubble)
                         }
                         ChatImages(item.images, imageCache, onOpenImage)
                     }
@@ -848,6 +883,9 @@ private fun ChatRow(
                 modifier = Modifier.padding(vertical = 4.dp),
             )
         }
+        is ChatItem.SystemDetail -> {
+            SystemDetailRow(item)
+        }
         is ChatItem.Cost -> {
             Text(
                 item.text,
@@ -857,8 +895,75 @@ private fun ChatRow(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
             )
         }
+        is ChatItem.Error -> ModelErrorCard(item)
         is ChatItem.Deliverables -> {
             DeliverablesRow(item.paths)
+        }
+    }
+}
+
+/** Collapsible one-line notice for large host-injected payloads (compaction
+ * checkpoints, skill catalog, runtime context). Tap to expand the full text. */
+@Composable
+private fun SystemDetailRow(item: ChatItem.SystemDetail) {
+    var expanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .clickable { expanded = !expanded }
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            DshIcon(
+                DshIcons.Think,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                size = 14.dp,
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                item.label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable {
+                        val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("system-detail", item.text))
+                        android.widget.Toast.makeText(context, Strings.str("copied"), android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                DshIcon(DshIcons.Copy, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = 12.dp)
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    Strings.str("copy"),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            Text(
+                Strings.str(if (expanded) "sys_detail_hide" else "sys_detail_show"),
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        if (expanded) {
+            Text(
+                item.text,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
     }
 }
@@ -903,6 +1008,60 @@ private fun DeliverablesRow(paths: List<String>) {
     }
 }
 
+/** Red failure card for a model request that failed (turn/end reason.kind == "error"). */
+@Composable
+private fun ModelErrorCard(item: ChatItem.Error) {
+    val wayne = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val context = LocalContext.current
+    val requestId = item.requestId
+    val detail = buildString {
+        if (item.code.isNotBlank()) append(item.code)
+        if (item.status > 0) append(if (isNotEmpty()) " · " else "").append("HTTP ${item.status}")
+        if (requestId.isNotBlank()) append(if (isNotEmpty()) " · " else "").append(requestId)
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+            .background(wayne.dangerContainer)
+            .clickable {
+                val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("model-error", item.message))
+                android.widget.Toast.makeText(context, Strings.str("copied"), android.widget.Toast.LENGTH_SHORT).show()
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                DshIcon(DshIcons.Warning, tint = wayne.onDangerContainer, size = 16.dp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    Strings.str("model_failed"),
+                    color = wayne.onDangerContainer,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                item.message,
+                color = wayne.onDangerContainer,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (detail.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    detail,
+                    color = wayne.onDangerContainer.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+    }
+}
+
 private fun toolIcon(card: String?, name: String): Int = when (card) {
     "diff" -> DshIcons.Edit
     "terminal" -> DshIcons.Api
@@ -923,6 +1082,13 @@ private fun toolIcon(card: String?, name: String): Int = when (card) {
 private sealed interface ChatRow {
     data class Single(val item: ChatItem) : ChatRow
     data class Tools(val items: List<ChatItem.Tool>) : ChatRow
+    /**
+     * 一整轮的过程:思考与工具调用按发生顺序放在一张卡里。
+     *
+     * 之前只有"连续的多个工具"才会合并,中间夹一条思考就断成两张卡,一輪跑下来
+     * 屏幕上是一串各说各话的小块。这里按"轮"聚合,完成即自动折叠成一行摘要。
+     */
+    data class Process(val items: List<ChatItem>) : ChatRow
     /** Files one turn touched, rendered inline right after that turn. */
     data class Files(val files: TurnFiles) : ChatRow
 }
@@ -941,6 +1107,13 @@ private data class TurnFiles(
     val isEmpty: Boolean get() = presented.isEmpty() && edited.isEmpty()
     /** Every path in the card, for the per-turn dedupe. */
     fun paths(): Sequence<String> = (presented.asSequence() + edited.asSequence()).map { it.path }
+
+    /**
+     * 增删行数。只统计有 diff 的文件 —— 没有 diff 的文件(纯交付、或只被读取)
+     * 记 0,而不是编一个数出来。
+     */
+    val addedLines: Int get() = (presented + edited).sumOf { it.added }
+    val removedLines: Int get() = (presented + edited).sumOf { it.removed }
 }
 
 /** Rows shown in a turn's file card before collapsing the rest into a `+N` hint. */
@@ -952,9 +1125,16 @@ private const val MAX_CARD_ROWS = 8
  * A single step stays on its own (there is nothing to fold), which keeps simple
  * answers looking exactly as before.
  */
+/**
+ * 把一串会话项折成可渲染的行。
+ *
+ * 关键规则:**一轮 = 一条用户消息到下一轮开始之间的过程**,期间的思考与工具调用
+ * 按发生顺序进同一个 [ChatRow.Process];最后的回答文本单独一行(它是给人读的,
+ * 不该被折进"过程"里);这一轮碰过的文件在该轮结束时单独出一张卡。
+ */
 private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
     val out = ArrayList<ChatRow>(items.size)
-    var buf = ArrayList<ChatItem.Tool>()
+    var process = ArrayList<ChatItem>()
     // Files this turn touched: flushed at the end of each turn, so every turn — and
     // every historical session — gets its own downloadable card. This deliberately
     // does NOT depend on the agent calling `present`: any file a tool wrote or
@@ -965,9 +1145,11 @@ private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
     // turn. Across turns a file may legitimately reappear (it changed again), which
     // is information worth keeping.
     var turnSeen = HashSet<String>()
-    fun flush() {
-        if (buf.size == 1) out.add(ChatRow.Single(buf[0])) else if (buf.size > 1) out.add(ChatRow.Tools(buf.toList()))
-        buf = ArrayList()
+    fun flushProcess() {
+        if (process.isNotEmpty()) {
+            out.add(ChatRow.Process(process.toList()))
+            process = ArrayList()
+        }
     }
     fun flushFiles() {
         val files = TurnFiles(presented.toList(), edited.toList())
@@ -976,28 +1158,49 @@ private fun groupToolSteps(items: List<ChatItem>): List<ChatRow> {
         edited = ArrayList()
         turnSeen = HashSet()
     }
-    for (item in items) {
-        if (item is ChatItem.Tool) {
-            buf.add(item)
-            val (delivered, touched) = filesOfTool(item)
-            for (f in touched) if (turnSeen.add(f.path)) edited.add(f)
-            // A handed-over file wins over a later "edited" entry for the same path.
-            for (f in delivered) {
-                if (turnSeen.add(f.path)) presented.add(f) else {
-                    edited.removeAll { it.path == f.path }
-                    if (presented.none { it.path == f.path }) presented.add(f)
-                }
+    fun trackFiles(item: ChatItem.Tool) {
+        val (delivered, touched) = filesOfTool(item)
+        for (f in touched) if (turnSeen.add(f.path)) edited.add(f)
+        // A handed-over file wins over a later "edited" entry for the same path.
+        for (f in delivered) {
+            if (turnSeen.add(f.path)) presented.add(f) else {
+                edited.removeAll { it.path == f.path }
+                if (presented.none { it.path == f.path }) presented.add(f)
             }
-        } else {
-            flush()
-            out.add(ChatRow.Single(item))
-            // A turn boundary: emit that turn's files right after its last output.
-            // A user message is a hard boundary too, in case a turn never ended
-            // cleanly (aborted run) — otherwise its files would leak into the next.
-            if ((item is ChatItem.Assistant && item.isTurnEnd) || item is ChatItem.User) flushFiles()
         }
     }
-    flush()
+    for (item in items) {
+        when {
+            item is ChatItem.Tool -> {
+                process.add(item)
+                trackFiles(item)
+            }
+            // 只有"纯思考"的助手项进过程;带正文的是回答,单独成行。
+            item is ChatItem.Assistant && item.text.isBlank() && item.reasoning.isNotBlank() -> {
+                process.add(item)
+            }
+            item is ChatItem.Assistant -> {
+                flushProcess()
+                out.add(ChatRow.Single(item))
+                if (item.isTurnEnd) {
+                    flushProcess()
+                    flushFiles()
+                }
+            }
+            // A user message is a hard boundary too, in case a turn never ended
+            // cleanly (aborted run) — otherwise its files would leak into the next.
+            item is ChatItem.User -> {
+                flushProcess()
+                flushFiles()
+                out.add(ChatRow.Single(item))
+            }
+            else -> {
+                flushProcess()
+                out.add(ChatRow.Single(item))
+            }
+        }
+    }
+    flushProcess()
     flushFiles()
     return out
 }
@@ -1023,8 +1226,23 @@ private fun filesOfTool(t: ChatItem.Tool): Pair<List<FileLink>, List<FileLink>> 
     val isPresent = t.name.equals("present", ignoreCase = true)
     val delivered = ArrayList<FileLink>(2)
     val edited = ArrayList<FileLink>(2)
-    if (isPresent) delivered.addAll(parseFileLinks(t.card, t.arguments)) else edited.addAll(parseFileLinks(t.card, t.arguments))
-    t.diffPath?.takeIf { it.isNotBlank() }?.let { edited.add(FileLink(it, labelOf(it))) }
+    // diff 的增删行数:有 diff 才有真实数字,给文件行显示 +N。
+    val diffStat = t.diffOld?.let { old -> t.diffNew?.let { new -> diffStatOf(old, new) } }
+    if (isPresent) {
+        delivered.addAll(parseFileLinks(t.card, t.arguments))
+    } else {
+        edited.addAll(parseFileLinks(t.card, t.arguments))
+    }
+    t.diffPath?.takeIf { it.isNotBlank() }?.let {
+        edited.add(
+            FileLink(
+                path = it,
+                label = labelOf(it),
+                added = diffStat?.first ?: 0,
+                removed = diffStat?.second ?: 0,
+            ),
+        )
+    }
     if (t.name.lowercase() in FILE_WRITING_TOOLS && !isPresent) {
         pathOfToolArguments(t.arguments)?.let { edited.add(FileLink(it, labelOf(it))) }
     }
@@ -1032,6 +1250,14 @@ private fun filesOfTool(t: ChatItem.Tool): Pair<List<FileLink>, List<FileLink>> 
 }
 
 private fun labelOf(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
+
+/** 一次改动新增 / 删除多少行(复用 [computeDiff],口径与 diff 视图一致)。 */
+private fun diffStatOf(oldText: String, newText: String): Pair<Int, Int> {
+    val lines = computeDiff(oldText, newText)
+    val added = lines.count { it is DiffLine.Added }
+    val removed = lines.count { it is DiffLine.Removed }
+    return added to removed
+}
 
 /** Pull `path` / `file_path` out of a tool-call arguments JSON object. */
 private fun pathOfToolArguments(arguments: String?): String? {
@@ -1171,6 +1397,253 @@ private fun ModelPickerDialog(
  * visible; once it ends the block collapses to a single summary line and can be
  * expanded again by tapping.
  */
+/**
+ * 一轮的过程卡:标题行 + 每步一行的紧凑列表。
+ *
+ * 视觉规则(对齐参考实现):
+ * - 整块是**一张**淡色卡,卡里的每一步不再各自带背景,否则一輪下来是十几个色块;
+ * - 每步 = 圆角图标块(按类别着色)+ 类别名 + 单行摘要 + 展开箭头;
+ * - 跑完自动折叠成一行摘要,点一下才展开细节。
+ */
+@Composable
+private fun TurnProcessCard(
+    items: List<ChatItem>,
+    running: Boolean,
+    fullReasoning: (Long) -> String,
+) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    val toolCount = items.count { it is ChatItem.Tool }
+    val messageCount = items.count { it is ChatItem.Assistant }
+    val hasError = items.any { it is ChatItem.Tool && it.isError }
+    // 正在跑就展开、跑完自动折叠;历史轮进来时 running=false,直接是折叠态。
+    // key 只认这一轮的第一项:流式追加不会改变它,否则每来一个新步骤就把"展开"重置。
+    val firstSeq = items.firstOrNull()?.let { seqOf(it) }
+    var expanded by remember(firstSeq) { mutableStateOf(running) }
+    // "正在跑"要能覆盖它:新一轮开始时自动展开一次,跑完再自动收起。
+    var autoExpanded by remember(firstSeq) { mutableStateOf(false) }
+    LaunchedEffect(running) {
+        if (running && !autoExpanded) {
+            expanded = true
+            autoExpanded = true
+        }
+    }
+    LaunchedEffect(running) { if (!running) expanded = false }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg))
+            .background(scheme.onSurface.copy(alpha = 0.03f)),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .pressableClick(onClick = { expanded = !expanded })
+                .padding(start = 12.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (running) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(15.dp),
+                    strokeWidth = 1.6.dp,
+                    color = scheme.primary,
+                )
+            } else {
+                DshIcon(
+                    DshIcons.Check,
+                    tint = if (hasError) sem.danger else sem.textTertiary,
+                    size = 15.dp,
+                    contentDescription = null,
+                )
+            }
+            Spacer(Modifier.width(9.dp))
+            Text(
+                buildString {
+                    append(if (running) "执行中" else "已完成")
+                    if (toolCount > 0) append(" · $toolCount 次工具调用")
+                    if (messageCount > 0) append(" · $messageCount 条消息")
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = scheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            DshIcon(
+                if (expanded) DshIcons.ChevronUp else DshIcons.ChevronDown,
+                tint = sem.textTertiary,
+                size = 16.dp,
+                contentDescription = null,
+            )
+        }
+        // 展开用 AnimatedVisibility:高度变化有过渡,不是"咔"一下跳开。
+        androidx.compose.animation.AnimatedVisibility(
+            visible = expanded,
+            enter = androidx.compose.animation.expandVertically(
+                animationSpec = androidx.compose.animation.core.tween(
+                    dev.dsh.remote.ui.theme.AppMotion.collapseMs,
+                    easing = dev.dsh.remote.ui.theme.AppMotion.std,
+                ),
+            ) + androidx.compose.animation.fadeIn(
+                animationSpec = androidx.compose.animation.core.tween(dev.dsh.remote.ui.theme.AppMotion.quickMs),
+            ),
+            exit = androidx.compose.animation.shrinkVertically(
+                animationSpec = androidx.compose.animation.core.tween(
+                    dev.dsh.remote.ui.theme.AppMotion.standardMs,
+                    easing = dev.dsh.remote.ui.theme.AppMotion.std,
+                ),
+            ) + androidx.compose.animation.fadeOut(
+                animationSpec = androidx.compose.animation.core.tween(dev.dsh.remote.ui.theme.AppMotion.quickMs),
+            ),
+        ) {
+            Column(Modifier.fillMaxWidth().padding(start = 8.dp, end = 10.dp, bottom = 8.dp)) {
+                items.forEach { item ->
+                    ProcessRow(item, fullReasoning)
+                }
+            }
+        }
+    }
+}
+
+/** 一条过程项的时间戳 / 唯一键。 */
+private fun seqOf(item: ChatItem): Long = when (item) {
+    is ChatItem.User -> item.seq
+    is ChatItem.Assistant -> item.seq
+    is ChatItem.Tool -> item.seq
+    is ChatItem.Meta -> item.seq
+    is ChatItem.SystemDetail -> item.seq
+    is ChatItem.Cost -> item.seq
+    else -> 0L
+}
+
+/** 工具类别 → 中文短标签(与图标一致)。 */
+private fun toolLabelOf(kind: ToolKind): String = when (kind) {
+    ToolKind.Shell -> "运行"
+    ToolKind.Edit -> "编辑"
+    ToolKind.Read -> "读取"
+    ToolKind.Web -> "联网"
+    ToolKind.Task -> "计划"
+    ToolKind.Media -> "媒体"
+    ToolKind.Other -> "工具"
+}
+
+/**
+ * 过程卡里的一行:图标块 + 标签 + 单行摘要 + 箭头;点开看细节。
+ *
+ * 思考项展开的是完整思考文本,工具项展开的是参数 / diff —— 与工具卡一致。
+ */
+@Composable
+private fun ProcessRow(item: ChatItem, fullReasoning: (Long) -> String) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    var expanded by remember { mutableStateOf(false) }
+    val kind = when (item) {
+        is ChatItem.Tool -> toolKindOf(item.name)
+        else -> ToolKind.Task
+    }
+    val isError = item is ChatItem.Tool && item.isError
+    val (badgeBg, badgeFg) = if (isError) {
+        sem.dangerContainer to sem.onDangerContainer
+    } else {
+        sem.tool(toolToneOf(kind))
+    }
+    val label = when (item) {
+        is ChatItem.Tool -> toolLabelOf(kind)
+        else -> "思考"
+    }
+    val icon = when (item) {
+        is ChatItem.Tool -> toolIcon(item.card, item.name)
+        else -> DshIcons.Think
+    }
+    val summary = when (item) {
+        is ChatItem.Tool -> item.summary
+            ?: item.arguments.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(120)
+            ?: ""
+        is ChatItem.Assistant -> lastLineSummary(item.reasoning)
+        else -> ""
+    }
+    val expandable = when (item) {
+        is ChatItem.Tool -> item.arguments.isNotBlank() || (item.diffOld != null && item.diffNew != null)
+        is ChatItem.Assistant -> item.reasoning.isNotBlank()
+        else -> false
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+                .then(
+                    if (expandable) Modifier.pressableClick(onClick = { expanded = !expanded })
+                    else Modifier,
+                )
+                .padding(horizontal = 6.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // 圆角图标块:类别色的淡底 + 同类前景,一眼能分出"在读还是在跑"。
+            Box(
+                Modifier
+                    .size(26.dp)
+                    .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+                    .background(badgeBg),
+                contentAlignment = Alignment.Center,
+            ) {
+                DshIcon(icon, tint = badgeFg, size = 15.dp, contentDescription = null)
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = scheme.onSurface,
+                maxLines = 1,
+            )
+            if (summary.isNotBlank()) {
+                Text(
+                    " · ",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = sem.textTertiary,
+                )
+                Text(
+                    summary,
+                    style = dev.dsh.remote.ui.theme.AppType.monoSmall(color = sem.textTertiary),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            if (expandable) {
+                DshIcon(
+                    if (expanded) DshIcons.ChevronUp else DshIcons.ChevronDown,
+                    tint = sem.textTertiary,
+                    size = 15.dp,
+                    contentDescription = null,
+                )
+            }
+        }
+        if (expanded) {
+            Column(Modifier.fillMaxWidth().padding(start = 42.dp, end = 6.dp, bottom = 6.dp)) {
+                when {
+                    item is ChatItem.Assistant -> Text(
+                        fullReasoning(item.seq).ifBlank { item.reasoning },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    item is ChatItem.Tool && item.diffOld != null && item.diffNew != null -> DiffView(item)
+                    item is ChatItem.Tool -> Text(
+                        item.arguments,
+                        style = dev.dsh.remote.ui.theme.AppType.monoSmall(color = sem.textTertiary),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
+            }
+        }
+    }
+}
 @Composable
 private fun ToolGroupCard(steps: List<ChatItem.Tool>, running: Boolean) {
     var expanded by remember(steps.size) { mutableStateOf(true) }
@@ -1182,41 +1655,45 @@ private fun ToolGroupCard(steps: List<ChatItem.Tool>, running: Boolean) {
         steps.groupingBy { toolKindOf(it.name) }.eachCount().maxByOrNull { it.value }?.key ?: ToolKind.Other
     }
     val hasError = steps.any { it.isError }
-    val accent = if (hasError) ToolErrorColor else dominant.color
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    val tone = toolToneOf(dominant)
+    val (toneContainer, toneOn) = if (hasError) sem.dangerContainer to sem.onDangerContainer else sem.tool(tone)
 
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .background(accent.copy(alpha = 0.10f), RoundedCornerShape(8.dp)),
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+            .background(toneContainer.copy(alpha = 0.72f)),
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(horizontal = 10.dp, vertical = 8.dp),
+                .pressableClick(onClick = { expanded = !expanded })
+                .padding(horizontal = 12.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (running) {
-                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = accent)
+                CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = toneOn)
             } else {
-                DshIcon(DshIcons.Check, tint = accent, size = 14.dp, contentDescription = null)
+                DshIcon(DshIcons.Check, tint = toneOn, size = 14.dp, contentDescription = null)
             }
             Spacer(Modifier.width(8.dp))
             Text(
                 if (running) "执行中 · ${steps.size} 个步骤" else "已完成 · ${steps.size} 个步骤",
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = toneOn,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 if (expanded) "收起" else "展开",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = toneOn.copy(alpha = 0.75f),
             )
             DshIcon(
                 if (expanded) DshIcons.ChevronDown else DshIcons.ChevronRight,
-                tint = MaterialTheme.colorScheme.primary,
+                tint = toneOn.copy(alpha = 0.75f),
                 size = 14.dp,
                 contentDescription = null,
             )
@@ -1234,10 +1711,43 @@ private object ChatFiles {
     var download: ((String) -> Unit)? = null
     /** Asks for confirmation before downloading (long-press entry point). */
     var confirm: ((FileLink) -> Unit)? = null
+    /** 复制路径到剪贴板。 */
+    var copyPath: ((String) -> Unit)? = null
+}
+
+/**
+ * 本轮里带 diff 的工具调用,按路径索引。
+ *
+ * 「查看改动」需要按文件路径找回那份 diff;文件卡本身只带路径与行数,所以由
+ * ChatScreen 在渲染前把本轮的 diff 登记进来。
+ */
+private object ChatDiffRegistry {
+    private val byPath = HashMap<String, ChatItem.Tool>()
+
+    fun reset() = byPath.clear()
+
+    fun register(tool: ChatItem.Tool) {
+        val path = tool.diffPath?.takeIf { it.isNotBlank() } ?: return
+        if (tool.diffOld == null || tool.diffNew == null) return
+        byPath[path] = tool
+    }
+
+    fun find(path: String): ChatItem.Tool? = byPath[path]
 }
 
 /** One file referenced by a tool result card. */
-private data class FileLink(val path: String, val label: String)
+/**
+ * 一个被工具碰过的文件。
+ *
+ * [added] / [removed] 来自 diff(有 diff 才有真实数字),没有 diff 时是 0 ——
+ * 界面据此决定"要不要显示 +N"。
+ */
+private data class FileLink(
+    val path: String,
+    val label: String,
+    val added: Int = 0,
+    val removed: Int = 0,
+)
 
 /**
  * Lift the `files` array out of a tool's card/arguments JSON.
@@ -1268,114 +1778,376 @@ private fun parseFileLinks(card: String?, arguments: String?): List<FileLink> {
     }
 }
 
-/** One downloadable file row, shared by single tool cards and folded groups. */
+/**
+ * 文件行:图标块 + 路径(等宽,单行省略) + 右侧增量。
+ *
+ * 长按 = 下载(先确认)。[onClick] 为空时整行不可点。
+ */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun FileLinkRow(f: FileLink) {
+private fun FileLinkRow(
+    f: FileLink,
+    leading: Int = DshIcons.FileAdd,
+    leadingTint: Color,
+    showStat: Boolean = true,
+    onClick: (() -> Unit)? = null,
+) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
     Row(
         Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = {}, onLongClick = { ChatFiles.confirm?.invoke(f) })
-            .padding(vertical = 4.dp),
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .combinedClickable(
+                onClick = { onClick?.invoke() },
+                onLongClick = { ChatFiles.confirm?.invoke(f) },
+            )
+            .padding(vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DshIcon(DshIcons.FolderOpen, tint = MaterialTheme.colorScheme.primary, size = 16.dp, contentDescription = null)
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
+        DshIcon(leading, tint = leadingTint, size = 17.dp, contentDescription = null)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            f.path,
+            style = dev.dsh.remote.ui.theme.AppType.monoSmall(color = scheme.onSurface),
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (showStat && f.added > 0) {
+            Spacer(Modifier.width(8.dp))
             Text(
-                f.path.substringAfterLast('/'),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                "+${f.added}",
+                style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.diffAddFg),
             )
-            if (f.label.isNotBlank() && f.label != f.path.substringAfterLast('/')) {
-                Text(
-                    f.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                )
-            }
         }
-        DshIcon(DshIcons.Copy, tint = MaterialTheme.colorScheme.primary, size = 16.dp, contentDescription = null)
+        if (showStat && f.removed > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "−${f.removed}",
+                style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.diffDelFg),
+            )
+        }
     }
 }
 
 /**
- * One turn's file card: 最终产物 on top, 已编辑文件 folded underneath.
+ * 一轮结束时的那两张卡。
  *
- * Splitting them keeps the delivered artefacts — the thing worth downloading —
- * at eye level, while a turn that rewrote a dozen files does not push the rest of
- * the conversation off screen. Edited rows stay one tap away and keep the same
- * long-press-to-download action.
+ * 视觉规则(对齐参考实现):
+ * - 每张卡是**一整块**淡底圆角面板,卡与卡之间留白,不画分割线;
+ * - 卡头 = 图标 + 一句话标题 + 右侧汇总;
+ * - 改动卡底部有一条「查看改动 ›」,点开看每个文件的 diff;
+ * - 交付卡的文件行是「图标块 + 文件名 + 说明 + ⋯」。
  */
 @Composable
 private fun TurnFilesCard(files: TurnFiles) {
-    var showEdited by remember(files) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        if (files.presented.isNotEmpty()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(6.dp).background(ToolKind.Edit.color, CircleShape))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    Strings.str("final_files"),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            Spacer(Modifier.height(2.dp))
-            files.presented.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
-            if (files.presented.size > MAX_CARD_ROWS) {
-                Text(
-                    Strings.str("more_files", files.presented.size - MAX_CARD_ROWS),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
-        }
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    var showDiff by remember(files) { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        // ---- 改动了 N 个文件 ----
         if (files.edited.isNotEmpty()) {
-            if (files.presented.isNotEmpty()) Spacer(Modifier.height(4.dp))
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { showEdited = !showEdited }
-                    .padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            val totalAdded = files.edited.sumOf { it.added }
+            val totalRemoved = files.edited.sumOf { it.removed }
+            dev.dsh.remote.ui.theme.GlassSurface(
+                tier = dev.dsh.remote.ui.theme.GlassTier.Card,
+                shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Box(Modifier.size(6.dp).background(ToolKind.Read.color, CircleShape))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "${Strings.str("edited_files")} · ${files.edited.size}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f),
-                )
-                DshIcon(
-                    if (showEdited) DshIcons.ChevronDown else DshIcons.ChevronRight,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    size = 14.dp,
-                    contentDescription = null,
-                )
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        DshIcon(
+                            DshIcons.Branch,
+                            tint = scheme.onSurface,
+                            size = 18.dp,
+                            contentDescription = null,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "改动了 ${files.edited.size} 个文件",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = scheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (totalAdded > 0) {
+                            Text(
+                                "+$totalAdded",
+                                style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.diffAddFg),
+                            )
+                        }
+                        if (totalRemoved > 0) {
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "−$totalRemoved",
+                                style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.diffDelFg),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    files.edited.take(MAX_CARD_ROWS).forEach { f ->
+                        FileLinkRow(
+                            f = f,
+                            leading = DshIcons.FileAdd,
+                            leadingTint = sem.diffAddFg,
+                        )
+                    }
+                    if (files.edited.size > MAX_CARD_ROWS) {
+                        Text(
+                            Strings.str("more_files", files.edited.size - MAX_CARD_ROWS),
+                            color = sem.textTertiary,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 27.dp, top = 2.dp),
+                        )
+                    }
+                    // 「查看改动 ›」:展开每个文件的 diff。
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+                            .pressableClick(onClick = { showDiff = !showDiff })
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (showDiff) "收起改动" else "查看改动",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = scheme.primary,
+                            modifier = Modifier.weight(1f),
+                        )
+                        DshIcon(
+                            if (showDiff) DshIcons.ChevronDown else DshIcons.ChevronRight,
+                            tint = sem.textTertiary,
+                            size = 16.dp,
+                            contentDescription = null,
+                        )
+                    }
+                }
             }
-            if (showEdited) {
-                Spacer(Modifier.height(2.dp))
-                files.edited.take(MAX_CARD_ROWS).forEach { f -> FileLinkRow(f) }
-                if (files.edited.size > MAX_CARD_ROWS) {
-                    Text(
-                        Strings.str("more_files", files.edited.size - MAX_CARD_ROWS),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelSmall,
-                    )
+            // 展开的 diff:每个文件一段,放在卡片下面,不再塞进卡里挤掉列表。
+            if (showDiff) {
+                Spacer(Modifier.height(4.dp))
+                files.edited.forEach { f ->
+                    val tool = ChatDiffRegistry.find(f.path)
+                    if (tool != null) {
+                        Box(Modifier.padding(start = 4.dp, top = 2.dp)) { DiffView(tool) }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // ---- 交付了 N 个文件 ----
+        if (files.presented.isNotEmpty()) {
+            dev.dsh.remote.ui.theme.GlassSurface(
+                tier = dev.dsh.remote.ui.theme.GlassTier.Card,
+                shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        DshIcon(
+                            DshIcons.Box,
+                            tint = scheme.onSurface,
+                            size = 18.dp,
+                            contentDescription = null,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "交付了 ${files.presented.size} 个文件",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = scheme.onSurface,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    files.presented.take(MAX_CARD_ROWS).forEach { f ->
+                        DeliveredRow(f)
+                    }
+                    if (files.presented.size > MAX_CARD_ROWS) {
+                        Text(
+                            Strings.str("more_files", files.presented.size - MAX_CARD_ROWS),
+                            color = sem.textTertiary,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+/**
+ * 交付行:图标块 + 文件名 + 说明 + ⋯。
+ *
+ * 图标块按扩展名换(ZIP / APK / 图片 / 其它),说明取工具给的 label,
+ * 没有就用路径。点 ⋯ 出菜单(打开 / 下载)。
+ */
+@Composable
+private fun DeliveredRow(f: FileLink) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    var menu by remember { mutableStateOf(false) }
+    val ext = f.path.substringAfterLast('.', "").lowercase()
+    val icon = when (ext) {
+        "zip", "apk", "aab", "jar", "tar", "gz", "7z", "rar" -> DshIcons.FileZip
+        else -> DshIcons.FolderOpen
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+            .combinedClickable(
+                onClick = { ChatFiles.confirm?.invoke(f) },
+                onLongClick = { ChatFiles.confirm?.invoke(f) },
+            )
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // 图标块:浅底 + 描边感的圆角方块,像一个小"文件类型徽章"。
+        Box(
+            Modifier
+                .size(38.dp)
+                .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+                .background(scheme.onSurface.copy(alpha = 0.04f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            DshIcon(icon, tint = scheme.onSurfaceVariant, size = 19.dp, contentDescription = null)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                f.path.substringAfterLast('/').substringAfterLast('\\'),
+                style = MaterialTheme.typography.bodyLarge,
+                color = scheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            val sub = f.label.takeIf { it.isNotBlank() && it != f.path.substringAfterLast('/') }
+            if (sub != null) {
+                Text(
+                    sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = sem.textTertiary,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Box {
+            IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
+                Text(
+                    "⋯",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = sem.textTertiary,
+                )
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("下载") },
+                    onClick = { menu = false; ChatFiles.confirm?.invoke(f) },
+                )
+                DropdownMenuItem(
+                    text = { Text("复制路径") },
+                    onClick = {
+                        menu = false
+                        ChatFiles.copyPath?.invoke(f.path)
+                    },
+                )
+            }
+        }
+    }
+}
+/** 附件的第二行说明:类型标签 · 大小,宿主没给标签就只显示大小。 */
+private fun attachmentDetail(att: dev.dsh.remote.data.UploadedAttachment): String {
+    val size = when {
+        att.bytes >= 1024L * 1024L -> "%.1f MB".format(att.bytes / 1024.0 / 1024.0)
+        att.bytes >= 1024L -> "%.0f KB".format(att.bytes / 1024.0)
+        else -> "${att.bytes} B"
+    }
+    val label = att.label?.takeIf { it.isNotBlank() }
+    return if (label != null) "$label · $size" else size
+}
+
+/**
+ * 输入条上方的附件卡片。
+ *
+ * 图标按扩展名换(文档 / 表格 / 演示 / PDF / 图片 / 压缩包),上传中显示进度条,
+ * 完成后可点右侧 × 移除。
+ */
+@Composable
+private fun AttachmentCard(
+    name: String,
+    detail: String,
+    progress: Float?,
+    onRemove: (() -> Unit)?,
+) {
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    val ext = name.substringAfterLast('.', "").lowercase()
+    val icon = when (ext) {
+        "pdf" -> DshIcons.FileAdd
+        "doc", "docx", "rtf" -> DshIcons.Edit
+        "xls", "xlsx", "csv" -> DshIcons.Checklist
+        "ppt", "pptx" -> DshIcons.Data
+        "zip", "7z", "rar", "tar", "gz" -> DshIcons.FileZip
+        "png", "jpg", "jpeg", "webp", "gif" -> DshIcons.Browse
+        else -> DshIcons.Folder
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.md))
+            .background(scheme.onSurface.copy(alpha = 0.04f))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(30.dp)
+                .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+                .background(scheme.primary.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            DshIcon(icon, tint = scheme.primary, size = 16.dp, contentDescription = null)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                name,
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurface,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Text(
+                detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = sem.textTertiary,
+            )
+            if (progress != null) {
+                Spacer(Modifier.height(4.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(3.dp),
+                    color = scheme.primary,
+                    trackColor = scheme.primary.copy(alpha = 0.15f),
+                )
+            }
+        }
+        if (onRemove != null) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+                DshIcon(
+                    DshIcons.Close,
+                    tint = sem.textTertiary,
+                    size = 14.dp,
+                    contentDescription = "移除附件",
+                )
+            }
+        }
+    }
+}
 @Composable
 private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
     val context = LocalContext.current
@@ -1393,19 +2165,22 @@ private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
     // the red so a failure never hides behind a category colour.
     val kind = remember(item.name) { toolKindOf(item.name) }
 
+    val tone = remember(kind) { toolToneOf(kind) }
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    val (toneContainer, toneOn) = if (isError) {
+        sem.dangerContainer to sem.onDangerContainer
+    } else {
+        sem.tool(tone)
+    }
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 3.dp)
-            .clickable { expanded = !expanded }
-            .background(
-                when {
-                    isError -> ToolErrorColor.copy(alpha = 0.12f)
-                    else -> kind.tint.copy(alpha = if (item.isResult) 0.12f else 0.18f)
-                },
-                RoundedCornerShape(6.dp),
-            )
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .clip(RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.sm))
+            .background(toneContainer.copy(alpha = if (isError) 0.85f else 1f))
+            .pressableClick(onClick = { expanded = !expanded })
+            .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         // File-carrying results get a real card: name, description, download.
         // The raw JSON is still reachable by expanding.
@@ -1484,7 +2259,7 @@ private fun ToolCard(item: ChatItem.Tool, running: Boolean = false) {
             }
             Text(
                 if (expanded) Strings.str("collapse") else Strings.str("expand"),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = sem.textTertiary,
                 style = MaterialTheme.typography.labelSmall,
             )
             DshIcon(
@@ -1664,27 +2439,28 @@ private fun StatsStrip(vm: AppViewModel) {
     }
     val hitPct = if (u.totalInput > 0) u.cacheReadTokens * 100.0 / u.totalInput else null
 
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
+    // 一行细小的等宽指标:等宽字体 + 浅色,数字不跳动也不抢眼。
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             if (tps > 0.05) "%.1f tok/s".format(tps) else "— tok/s",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.textTertiary),
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(12.dp))
         Text(
-            ctxPct?.let { "上下文 %.0f%%".format(it) } ?: "上下文 —",
-            style = MaterialTheme.typography.labelSmall,
-            color = if ((ctxPct ?: 0.0) > 85.0) MaterialTheme.colorScheme.error
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+            ctxPct?.let { "ctx %.0f%%".format(it) } ?: "ctx —",
+            style = dev.dsh.remote.ui.theme.AppType.monoLabel(
+                color = if ((ctxPct ?: 0.0) > 85.0) sem.danger else sem.textTertiary,
+            ),
         )
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(12.dp))
         Text(
-            hitPct?.let { "缓存 %.0f%%".format(it) } ?: "缓存 —",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            hitPct?.let { "cache %.0f%%".format(it) } ?: "cache —",
+            style = dev.dsh.remote.ui.theme.AppType.monoLabel(color = sem.textTertiary),
         )
     }
 }
@@ -1734,6 +2510,8 @@ private fun formatRunDuration(totalSeconds: Long): String {
 @Composable
 private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
     val draft by vm.draft.collectAsState()
+    val sem = dev.dsh.remote.ui.theme.LocalDshSemantic.current
+    val scheme = MaterialTheme.colorScheme
     val queue by vm.queueItems.collectAsState()
     var modelMenu by remember { mutableStateOf(false) }
     var modelPicker by remember { mutableStateOf(false) }
@@ -1758,6 +2536,14 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
 
     val context = LocalContext.current
     val pickScope = rememberCoroutineScope()
+    // 文档 / 表格 / 演示附件:走 dsh-file-upload 的 /api/upload(原始字节)。
+    val attachments by vm.attachments.collectAsState()
+    val uploading by vm.uploading.collectAsState()
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        uris.forEach { uri -> vm.uploadAttachment(uri) }
+    }
     var pendingImages by remember { mutableStateOf<List<PendingImage>>(emptyList()) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) {
@@ -1778,13 +2564,17 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(8.dp),
-    ) {
+    val surfaces = dev.dsh.remote.ui.theme.LocalDshSurfaces.current
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
         ModeRow(vm)
+        Spacer(Modifier.height(6.dp))
+        // 输入条:浮在内容上的玻璃(取样背景),不是一块不透明面板。
+        dev.dsh.remote.ui.theme.GlassSurface(
+            tier = dev.dsh.remote.ui.theme.GlassTier.Chrome,
+            shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.xl),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box {
                 Row(
@@ -1902,6 +2692,33 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
                 }
             }
         }
+        // ---- 文档附件卡片 ----
+        if (attachments.isNotEmpty() || uploading.isNotEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                attachments.forEach { att ->
+                    AttachmentCard(
+                        name = att.name,
+                        detail = attachmentDetail(att),
+                        progress = null,
+                        onRemove = { vm.removeAttachment(att.name) },
+                    )
+                }
+                uploading.forEach { (name, progress) ->
+                    AttachmentCard(
+                        name = name,
+                        detail = "上传中 ${(progress * 100).toInt()}%",
+                        progress = progress,
+                        onRemove = null,
+                    )
+                }
+            }
+        }
+
         if (pendingImages.isNotEmpty()) {
             Row(
                 Modifier.fillMaxWidth().padding(bottom = 4.dp),
@@ -1953,13 +2770,32 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
                 }
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
+        Row(verticalAlignment = Alignment.Bottom) {
+            // 柔和圆角:去掉 OutlinedTextField 的硬描边,改成一整块淡底 + 大圆角。
+            // 描边会把输入区框成"表单控件",而这里它应该像一张纸。
+            TextField(
                 value = draft,
                 onValueChange = { vm.setDraft(it) },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text(Strings.str("input_hint")) },
-                maxLines = 5,
+                placeholder = {
+                    Text(
+                        Strings.str("input_hint"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = sem.textTertiary,
+                    )
+                },
+                maxLines = 6,
+                shape = RoundedCornerShape(dev.dsh.remote.ui.theme.AppShape.lg),
+                textStyle = MaterialTheme.typography.bodyMedium.copy(color = scheme.onSurface),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = scheme.onSurface.copy(alpha = 0.04f),
+                    unfocusedContainerColor = scheme.onSurface.copy(alpha = 0.04f),
+                    disabledContainerColor = scheme.onSurface.copy(alpha = 0.03f),
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                    cursorColor = scheme.primary,
+                ),
                 visualTransformation = SlashCommandTransformation(DshAmber),
             )
             if (running) {
@@ -1975,8 +2811,27 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
                     )
                 }
             }
+            // 回形针:文档 / 表格 / 演示 / 图片都能选(以前只给图片)。
             IconButton(
-                onClick = { imagePicker.launch("*/*") },
+                onClick = {
+                    filePicker.launch(
+                        arrayOf(
+                            "application/pdf",
+                            "application/msword",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.ms-excel",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.ms-powerpoint",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "text/*",
+                            "application/json",
+                            "application/rtf",
+                            "application/epub+zip",
+                            "application/zip",
+                            "image/*",
+                        ),
+                    )
+                },
                 modifier = Modifier.size(48.dp),
             ) {
                 DshIcon(DshIcons.Paperclip, tint = MaterialTheme.colorScheme.onSurfaceVariant, size = 20.dp)
@@ -1989,9 +2844,18 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
                         val data = imgs.map { ImageData(it.mediaType, it.base64, it.name) }
                         vm.sendImagesText(sessionId, data, draft)
                         pendingImages = emptyList()
-                    } else if (running) vm.enqueue(draft) else vm.send(draft)
+                    } else if (running) {
+                        vm.enqueue(draft)
+                    } else {
+                        val sid = vm.currentSessionId.value
+                        if (attachments.isNotEmpty() && sid != null) {
+                            vm.sendWithAttachments(sid, draft)
+                        } else {
+                            vm.send(draft)
+                        }
+                    }
                 },
-                enabled = draft.isNotBlank() || pendingImages.isNotEmpty(),
+                enabled = draft.isNotBlank() || pendingImages.isNotEmpty() || attachments.isNotEmpty(),
                 modifier = Modifier.size(48.dp),
             ) {
                 DshIcon(
@@ -2001,6 +2865,8 @@ private fun Composer(vm: AppViewModel, currentModel: String, running: Boolean) {
                     contentDescription = if (running) Strings.str("enqueue") else Strings.str("send"),
                 )
             }
+        }
+        }
         }
     }
 

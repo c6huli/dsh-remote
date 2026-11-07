@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,22 +58,23 @@ fun DownloadsScreen(vm: AppViewModel, onBack: () -> Unit) {
     val context = LocalContext.current
     var entries by remember { mutableStateOf<List<DownloadEntry>?>(null) }
     var pendingDelete by remember { mutableStateOf<DownloadEntry?>(null) }
+    // 必须 collect:直接读 StateFlow.value 在组合期不会订阅,设置里换了目录这里不刷新。
+    val downloadTree by vm.downloadTree.collectAsState()
 
 
     LaunchedEffect(Unit) { entries = vm.listDownloads() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
-                DshIcon(DshIcons.ChevronLeft, tint = MaterialTheme.colorScheme.onSurface, size = 22.dp, contentDescription = "返回")
-            }
+            dev.dsh.remote.ui.theme.GlassIconButton(icon = DshIcons.ChevronLeft, onClick = onBack)
+            Spacer(Modifier.width(10.dp))
             Text("已下载文件", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             TextButton(onClick = { entries = null }, enabled = false) { Text("") }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 0.5.dp)
 
         val list = entries
         when {
@@ -86,7 +88,7 @@ fun DownloadsScreen(vm: AppViewModel, onBack: () -> Unit) {
                 Text("还没有下载过文件", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    vm.downloadTreeLabel(vm.downloadTree.value) + "\n下载位置可在设置里更换",
+                    vm.downloadTreeLabel(downloadTree) + "\n下载位置可在设置里更换",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

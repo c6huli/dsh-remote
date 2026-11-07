@@ -155,12 +155,24 @@ object Strings {
         "image_preview" to ("图片" to "Image"),
         "command_failed" to ("命令执行失败" to "Command failed"),
         "command_error" to ("命令失败" to "Command failed"),
+        "model_failed" to ("模型请求失败" to "Model request failed"),
 
         // ---- plan/goal commands ----
         "cmd_plan" to ("进入或退出计划模式" to "Enter or leave plan mode"),
         "cmd_goal" to ("查看或设置长期任务目标" to "View or set the long-running goal"),
         "cmd_compact" to ("压缩较早的对话历史" to "Compact older conversation history"),
         "plan_active" to ("（当前：计划中）" to (" (planning)")),
+
+        // ---- host-injected system notices (collapsible big payloads) ----
+        "sys_compaction" to ("对话已压缩（上下文检查点）· 点击查看" to "Compacted conversation (context checkpoint) · tap to view"),
+        "sys_skill_catalog" to ("系统技能目录" to "System skill catalog"),
+        "sys_runtime_context" to ("运行时上下文快照" to "Runtime context snapshot"),
+        "sys_model_notice" to ("模型切换通知" to "Model change notice"),
+        "sys_subagent_done" to ("子代理已结束" to "Subagent settled"),
+        "sys_agent_message" to ("代理消息" to "Agent message"),
+        "sys_system" to ("系统消息" to "System message"),
+        "sys_detail_show" to ("展开" to "Expand"),
+        "sys_detail_hide" to ("收起" to "Collapse"),
 
         // ---- notifications (foreground service) ----
         "notif_task_done" to ("DSH 任务已完成" to "DSH task completed"),
@@ -311,6 +323,7 @@ object Strings {
         "unread" to ("未读" to "Unread"),
         "new_session" to ("新建会话" to "New session"),
         "batch_delete" to ("批量删除" to "Batch delete"),
+        "collapse_sidebar" to ("收起侧边栏" to "Collapse sidebar"),
         "search_conversations" to ("搜索对话…" to "Search conversations…"),
         "selected_items" to ("已选 {0} 项" to "{0} selected"),
         "workspace_files" to ("工作区文件" to "Workspace files"),

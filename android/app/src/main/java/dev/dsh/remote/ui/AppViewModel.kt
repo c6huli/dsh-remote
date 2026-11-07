@@ -1,5 +1,6 @@
 package dev.dsh.remote.ui
 import android.app.Application
+import android.util.Log
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
@@ -33,6 +34,7 @@ import dev.dsh.remote.data.SettingsNamespace
 import dev.dsh.remote.data.SettingsStore
 import dev.dsh.remote.data.WorkspaceView
 import dev.dsh.remote.data.foldChat
+import dev.dsh.remote.data.turnEndErrorOf
 import dev.dsh.remote.data.reasoningOf
 import dev.dsh.remote.data.reasoningSummaryOf
 import dev.dsh.remote.data.textOf
@@ -66,6 +68,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -156,6 +159,126 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setVerbose(v: Boolean) { viewModelScope.launch { settings.setVerbose(v) } }
 
+    /** 配色 id(默认雾蓝)。 */
+    val accentId: StateFlow<String> = settings.accentId
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "mist")
+
+    fun setAccentId(v: String) {
+        viewModelScope.launch { settings.setAccentId(v) }
+    }
+
+    /** 玻璃透明总开关(默认开)。关掉后玻璃走近乎不透明的兜底填充。 */
+    val glassBlur: StateFlow<Boolean> = settings.glassBlur
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    fun setGlassBlur(v: Boolean) {
+        viewModelScope.launch { settings.setGlassBlur(v) }
+    }
+    /** 手机操控总开关（默认关闭）。关掉时同时解除特权通道。 */
+    val phoneControl: StateFlow<Boolean> = settings.phoneControl
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private var phoneSession: dev.dsh.remote.phone.PhoneSession? = null
+
+    /** 页面用同一个实例，避免开关与页面各自持有一条 Shizuku 连接。 */
+    fun phoneSession(): dev.dsh.remote.phone.PhoneSession {
+        val existing = phoneSession
+        if (existing != null) return existing
+        val created = dev.dsh.remote.phone.PhoneSession(getApplication(), viewModelScope)
+        phoneSession = created
+        return created
+    }
+
+    private var phoneCommandRunner: dev.dsh.remote.phone.PhoneCommandRunner? = null
+
+    /** 意图分析走桌面那台 dsh 的模型，手机自己不需要模型。 */
+    private var phonePlanner: dev.dsh.remote.phone.HostPhonePlanner? = null
+
+    /**
+     * 指令输入页的后台执行器。与页面同等重要地只留一份：悬浮「紧急停止」
+     * 通过 [dev.dsh.remote.phone.PhoneCommandRunnerHolder] 找到同一个实例，
+     * 才能真的取消正在跑的那条指令。
+     */
+    fun phoneCommandRunner(): dev.dsh.remote.phone.PhoneCommandRunner {
+        val existing = phoneCommandRunner
+        if (existing != null) return existing
+        val planner = phonePlanner ?: dev.dsh.remote.phone.HostPhonePlanner { api }.also {
+            it.screenWidth = phoneScreenWidth()
+            it.screenHeight = phoneScreenHeight()
+            phonePlanner = it
+        }
+        val created = dev.dsh.remote.phone.PhoneCommandRunner(
+            getApplication(),
+            viewModelScope,
+            planner,
+            // Share the page's engine handle: one Shizuku binding, not two.
+            phoneSession().control,
+        )
+        phoneCommandRunner = created
+        dev.dsh.remote.phone.PhoneCommandRunnerHolder.install(created)
+        return created
+    }
+
+    /** 屏幕像素尺寸，给模型估算坐标用。 */
+    private fun phoneScreenWidth(): Int = getApplication<android.app.Application>().resources.displayMetrics.widthPixels
+
+    private fun phoneScreenHeight(): Int = getApplication<android.app.Application>().resources.displayMetrics.heightPixels
+
+    /** 给 agent 用的本地控制端点(127.0.0.1:3087),只在总开关打开时启动。 */
+    private var phoneBridge: dev.dsh.remote.phone.PhoneBridgeServer? = null
+
+    /**
+     * 启动 / 停止「agent 操控手机」端点。
+     *
+     * 端点存在的前提是用户把设置里的总开关打开并授权了 Shizuku:没有授权时
+     * 端点即使起来了,每个动作也只会拿到"特权通道未连接"。所以这里只负责
+     * 生命周期,权限判断留给 [PhoneControl]。
+     */
+    fun syncPhoneBridge(enabled: Boolean) {
+        if (enabled) {
+            if (phoneBridge != null) return
+            try {
+                val ctx = getApplication<Application>()
+                val control = dev.dsh.remote.phone.PhoneControl(ctx)
+                val server = dev.dsh.remote.phone.PhoneBridgeServer(ctx, control)
+                server.start(android.os.Build.VERSION.SDK_INT, true)
+                phoneBridge = server
+                Log.i("DshPhoneBridge", "listening on 127.0.0.1:${dev.dsh.remote.phone.PhoneBridgeServer.DEFAULT_PORT}")
+            } catch (t: Throwable) {
+                Log.w("DshPhoneBridge", "start failed", t)
+                toast("手机操控端点启动失败:${t.message}")
+            }
+        } else {
+            try {
+                phoneBridge?.stop()
+            } catch (_: Throwable) {
+            }
+            phoneBridge = null
+        }
+    }
+
+    /** 端点是否在跑 + 端口 + token,设置页显示用。 */
+    fun phoneBridgeInfo(): Triple<Boolean, Int, String> = Triple(
+        phoneBridge?.isAlive == true,
+        dev.dsh.remote.phone.PhoneBridgeServer.DEFAULT_PORT,
+        dev.dsh.remote.phone.PhoneBridgeServer.readToken(getApplication()) ?: "",
+    )
+    fun setPhoneControl(v: Boolean) {
+        viewModelScope.launch {
+            settings.setPhoneControl(v)
+            val session = phoneSession
+            if (!v) {
+                session?.stopMirror()
+                session?.disconnect()
+                syncPhoneBridge(false)
+            } else {
+                syncPhoneBridge(true)
+                session?.observe()
+                if (session?.status?.value?.granted == true) session.connect()
+            }
+        }
+    }
+
     val language: StateFlow<String> = settings.language
         .stateIn(viewModelScope, SharingStarted.Eagerly, "zh")
     fun setLanguage(v: String) {
@@ -243,7 +366,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     Strings.str("balance_only", fmtYuan(total))
                 }
-                _chatItems.value = _chatItems.value + ChatItem.Cost(text)
+                appendChat(ChatItem.Cost(text))
                 lastBalance = total
             } else if (tu != null && (tu.totalInput + tu.outputTokens) > 0) {
                 // No API key / balance unavailable → fall back to a token estimate.
@@ -258,7 +381,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     fmtTokens(tu.totalInput),
                     fmtTokens(tu.outputTokens),
                 )
-                _chatItems.value = _chatItems.value + ChatItem.Cost(costText)
+                appendChat(ChatItem.Cost(costText))
             }
         }
     }
@@ -337,6 +460,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _imageCache = MutableStateFlow<Map<String, Bitmap>>(emptyMap())
     val imageCache: StateFlow<Map<String, Bitmap>> = _imageCache.asStateFlow()
     private val _streaming = MutableStateFlow("")
+
+    /** 流式文本的累积缓冲(见 appendLiveEvent:避免每帧 O(n) 拼接)。 */
+    private val streamingBuf = StringBuilder()
+    private val reasoningBuf = StringBuilder()
     val streaming: StateFlow<String> = _streaming.asStateFlow()
     private val _streamingReasoning = MutableStateFlow("")
     val streamingReasoning: StateFlow<String> = _streamingReasoning.asStateFlow()
@@ -472,6 +599,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val runningBySession = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val queueBySession = java.util.concurrent.ConcurrentHashMap<String, List<QueueItem>>()
     private val jobsBySession = java.util.concurrent.ConcurrentHashMap<String, List<JobView>>()
+    /** Files explicitly `present`-ed during the live turn, shown as a deliverable card at turn end. */
+    private val liveProduced = LinkedHashSet<String>()
     private var _oldestSeq: Long? = null
     private var fullTimelineSessionId: String? = null
     private var turnUsage: TurnUsage? = null
@@ -909,6 +1038,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var lastFrameAt: Long = 0L
     companion object {
         private const val MAX_EVENTS = 800
+
+    /** 聊天项上限:超长会话只保留尾部,避免列表无限增长拖慢滚动。 */
+    private const val MAX_CHAT_ITEMS = 1200
         /** Whole-host reachability probe budget, shared by all candidates. */
         private const val PROBE_TIMEOUT_MS = 8_000L
         /** Streams this idle on resume are treated as half-open and rebuilt. */
@@ -931,12 +1063,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Apply the saved language before any UI composes, then auto-connect.
         viewModelScope.launch { Strings.setLang(settings.language.first()) }
-        fetchPrices()
-        connect()
+        // No cache wipe here on purpose: the panels' client bundle is several MB, and
+        // dropping the WebView cache makes every load pay that download again over the
+        // tailnet. A stale bundle is preferable to a slow panel.
+        //
+        // Both of these can throw during construction (SSL context init, a broken
+        // prefs file). They run in their own coroutines, but starting them must
+        // never be allowed to take the ViewModel - and therefore the Activity -
+        // down with them, so the launches themselves are guarded.
+        runCatching { fetchPrices() }
+        runCatching { connect() }
     }
+
     /** Fetch the latest pricing table from `prices.json`; built-in defaults are kept on failure. */
     private fun fetchPrices() {
-        viewModelScope.launch {
+        // MUST start on IO. viewModelScope is Main.immediate, so a plain launch
+        // here ran inline up to the first suspension — and this body's first call
+        // builds an OkHttp client (SSLContext + SecureRandom). That executed during
+        // ViewModel construction, i.e. inside the first composition; with a cold
+        // entropy pool it left the window blank with no frame drawn.
+        viewModelScope.launch(Dispatchers.IO) {
             try {
                 val client = TrustAll.client()
                 val req = okhttp3.Request.Builder().url(PRICES_URL).build()
@@ -1100,7 +1246,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _connecting.value = true
             try {
                 val preferred = (url ?: serverUrl.first()).trimEnd('/')
-                val client = TrustAll.client()
+                // Building the client touches SSLContext/SecureRandom; keep it off
+                // the main thread so the first frame is never held hostage by it.
+                val client = kotlinx.coroutines.withContext(Dispatchers.IO) { TrustAll.client() }
                 // A saved/pinned host can rot (stale MagicDNS suffix, changed
                 // node IP). Probe the preferred base URL first, then every
                 // built-in candidate, and keep whichever answers.
@@ -1110,6 +1258,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val dshApi = DshApi(rpc)
                 api = dshApi
                 baseUrl = url2
+                // A different host means the planner's cached session id is not
+                // ours any more; forget it so the next instruction makes a new one.
+                phonePlanner?.reset()
                 _activeBaseUrl.value = url2
                 wsClient = client
                 _connected.value = true
@@ -1235,6 +1386,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         muxJob?.cancel()
         hostJob?.cancel()
         framesUrl = url
+        // 重连即补拉:WebSocket 断开期间(后台、隧道抖动)新增的会话不会补发
+        // 事件,只能在这里拉一次,否则那一行永远不出现。
+        if (!stillStreaming) pullSessionsNow()
         val ws = WsClient(url, client)
         muxJob = viewModelScope.launch {
             ws.frames("/api/events.mux").collect { frame ->
@@ -1242,9 +1396,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val type = frame.payload["type"]?.jsonPrimitive?.content ?: return@collect
                 val sessionId = frame.payload["sessionId"]?.jsonPrimitive?.content
                 when (type) {
+                    // 单帧解析失败不能让整条流断掉:一个畸形事件(宿主升级后新增
+                    // 字段、半包、被截断的 JSON)以前会抛出到 collect,整个 mux 流
+                    // 随之取消,表现就是"突然不动了,得重进会话"。
                     "session/event" -> if (sessionId == _currentSessionId.value) {
-                        val ev = json.decodeFromJsonElement<SessionEvent>(frame.payload["event"] ?: return@collect)
-                        appendLiveEvent(ev)
+                        try {
+                            val ev = json.decodeFromJsonElement<SessionEvent>(frame.payload["event"] ?: return@collect)
+                            appendLiveEvent(ev)
+                        } catch (t: Throwable) {
+                            Log.w("DshFrames", "session/event 解析失败,已跳过", t)
+                        }
                     }
                     "question/requested" -> {
                         val questions = json.decodeFromJsonElement<List<QuestionItem>>(
@@ -1337,12 +1498,53 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         refreshSessionsDebounced(1_000L)
                     }
-                    "host/session-added", "host/session-removed" -> refreshSessionsDebounced(1_000L)
+                    // 会话新增 / 删除:立刻刷,不走 debounce。
+                    //
+                    // debounce 有个洞:WebSocket 断开期间(切后台、隧道抖动)新增的
+                    // 会话,恢复后不会补发事件,于是那一行永远不出现。这里除了立刻
+                    // 刷新,还顺手把 workspace 一起拉一次 —— 新会话可能挂在某个
+                    // 工作区下,只刷 session 列表会漏掉分组。
+                    // 只调 refreshAll:它内部已经包含 session.list。
+                    // 早先这里 refreshSessions() + refreshAll() 连发两次,
+                    // 一次会话事件就拉两遍 ~250KB 的列表 —— 手机上表现为卡顿。
+                    "host/session-added", "host/session-removed" -> refreshAll()
                     "host/workspace-changed", "host/workspace-removed",
                     "host/workspace-order-changed", "host/archived-sessions-changed" -> refreshAll()
                 }
             }
         }
+    }
+    /**
+     * 清空流式缓冲与对应的 StateFlow。
+     *
+     * 缓冲和 StateFlow 必须一起清:只清 StateFlow 的话,下一次 delta 会把旧内容
+     * 重新 toString 出来,回答末尾就挂上一轮的残文。
+     */
+    /**
+     * 往聊天列表追加若干项。
+     *
+     * 直接 `_chatItems.value + x` 每次都会复制整个列表:一轮跑下来几百条工具
+     * 调用,追加成本是 O(n²),滚动时会明显掉帧。这里用 ArrayList 预分配后
+     * 一次替换,并且给总条数封顶(超长会话只保留尾部,历史仍在 _events 里,
+     * 重新打开会话会从宿主重新拉)。
+     */
+    private fun appendChat(vararg items: ChatItem) {
+        if (items.isEmpty()) return
+        val cur = _chatItems.value
+        val out = ArrayList<ChatItem>(cur.size + items.size)
+        out.addAll(cur)
+        out.addAll(items)
+        _chatItems.value = if (out.size > MAX_CHAT_ITEMS) {
+            ArrayList(out.subList(out.size - MAX_CHAT_ITEMS, out.size))
+        } else {
+            out
+        }
+    }
+    private fun resetStreaming() {
+        streamingBuf.setLength(0)
+        reasoningBuf.setLength(0)
+        _streaming.value = ""
+        _streamingReasoning.value = ""
     }
     private fun appendLiveEvent(ev: SessionEvent) {
         val sessionId = _currentSessionId.value ?: return
@@ -1359,12 +1561,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val chunkType = chunk?.get("type")?.jsonPrimitive?.content
             val text = chunk?.get("text")?.jsonPrimitive?.content ?: ""
             when (chunkType) {
-                "text-delta" -> if (text.isNotEmpty()) _streaming.value = _streaming.value + text
-                "reasoning-delta" -> if (text.isNotEmpty()) _streamingReasoning.value = _streamingReasoning.value + text
+                // 流式增量:用 StringBuilder 累积,只在提交时生成一次字符串。
+                //
+                // 原来是 `_streaming.value + text` —— 每个 delta 都复制整段已生成
+                // 文本,一段几千字的回答下来是 O(n²) 次字符复制,主线程直接被拖住,
+                // 表现就是"打字打一半突然卡住"。
+                "text-delta" -> if (text.isNotEmpty()) {
+                    streamingBuf.append(text)
+                    _streaming.value = streamingBuf.toString()
+                }
+                "reasoning-delta" -> if (text.isNotEmpty()) {
+                    reasoningBuf.append(text)
+                    _streamingReasoning.value = reasoningBuf.toString()
+                }
             }
             return
         }
-        _events.value = (_events.value + ev).takeLast(MAX_EVENTS)
+        // 事件只保留最近 MAX_EVENTS 条。原来是 `(_events.value + ev).takeLast(N)`,
+        // 每来一帧就复制整个 800 条列表;改成"超了才裁,且一次只裁一条"。
+        _events.value = buildList(_events.value.size.coerceAtMost(MAX_EVENTS) + 1) {
+            addAll(_events.value)
+            add(ev)
+            if (size > MAX_EVENTS) removeAt(0)
+        }
         when (ev.type) {
             "assistant/message" -> {
                 val msg = ev.data["message"]?.jsonObject
@@ -1373,7 +1592,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val reasoningSummary = reasoningSummaryOf(content)
                 val images = imagesOf(content)
                 if (text.isNotBlank() || reasoningSummary.isNotBlank() || images.isNotEmpty()) {
-                    _chatItems.value = _chatItems.value + ChatItem.Assistant(text, ev.seq, reasoningSummary, images = images)
+                    appendChat(ChatItem.Assistant(text, ev.seq, reasoningSummary, images = images))
                 }
                 _currentSessionId.value?.let { sid -> images.forEach { loadImage(sid, it) } }
                 // Accumulate per-turn token usage for the cost line.
@@ -1386,14 +1605,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     turnUsage = turnUsage?.plus(usage) ?: usage
                     _turnUsageFlow.value = turnUsage
                 }
-                _streaming.value = ""
-                _streamingReasoning.value = ""
+                resetStreaming()
             }
             "turn/start" -> {
                 turnUsage = null
+                liveProduced.clear()
                 _turnUsageFlow.value = null
-                _streaming.value = ""
-                _streamingReasoning.value = ""
+                resetStreaming()
                 // The authoritative start of this turn — this is what the whale
                 // counts from, so a turn begun elsewhere also gets a real start.
                 _currentSessionId.value?.let { sid ->
@@ -1402,8 +1620,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             "turn/end" -> {
-                _streaming.value = ""
-                _streamingReasoning.value = ""
+                resetStreaming()
+                // A failed model request is reported as reason.kind == "error" with
+                // the LlmFailure inside reason.error. Surface it so the failure
+                // content reaches the user immediately instead of silently ending.
+                turnEndErrorOf(ev.data, ev.seq)?.let { appendChat(it) }
                 // Clear the spinner here too: if the session-status frame is lost the
                 // turn otherwise looked like it kept running forever.
                 runningBySession[sessionId] = false
@@ -1420,13 +1641,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 // Show the real cost of this turn from the balance difference;
                 // fall back to a token estimate when balance isn't available.
+                if (liveProduced.isNotEmpty()) {
+                    appendChat(ChatItem.Deliverables(liveProduced.toList()))
+                    liveProduced.clear()
+                }
                 val tu = turnUsage
                 turnUsage = null
                 queryTurnCost(tu)
             }
+            // `present`-ed files: the host records a durable delivery list in its own
+            // event. Collect it so the deliverable card appears at this turn's end
+            // even when the file was produced by a shell command (no diff view).
+            "deliverables/presented" -> {
+                val files = ev.data["files"] as? JsonArray
+                if (files != null) {
+                    for (f in files) {
+                        val p = (f as? JsonObject)?.get("path")?.jsonPrimitive?.content
+                        if (!p.isNullOrBlank()) liveProduced.add(p)
+                    }
+                }
+            }
             "tool/call" -> {
                 val folded = foldChat(listOf(ev))
-                if (folded.isNotEmpty()) _chatItems.value = _chatItems.value + folded
+                if (folded.isNotEmpty()) appendChat(*folded.toTypedArray())
             }
             "tool/result" -> {
                 val resultItem = foldChat(listOf(ev)).firstOrNull() as? ChatItem.Tool
@@ -1444,13 +1681,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         diffNew = resultItem.diffNew ?: last.diffNew,
                     )
                 } else if (resultItem != null) {
-                    _chatItems.value = _chatItems.value + resultItem
+                    appendChat(resultItem)
                 }
             }
             else -> {
                 val folded = foldChat(listOf(ev))
                 if (folded.isNotEmpty()) {
-                    _chatItems.value = _chatItems.value + folded
+                    appendChat(*folded.toTypedArray())
                     // A live user/message (image) reaches this branch; kick off
                     // image loading here too, otherwise the thumbnail stays on
                     // its "loading" placeholder until the session is reopened.
@@ -1480,7 +1717,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     null
                 }
             }
-            val bmp = if (bytes != null) decodeImage(bytes.base64, maxDim = 2048) else null
+            // 解码放到后台:一张 2048px 的图在主线程解要几十毫秒,聊天里连续
+            // 出现几张时会明显掉帧(表现就是"突然卡一下")。
+            val bmp = if (bytes != null) {
+                withContext(Dispatchers.Default) { decodeImage(bytes.base64, maxDim = 2048) }
+            } else {
+                null
+            }
             if (bmp != null) {
                 // Only cache if still relevant (session may have switched meanwhile).
                 if (_currentSessionId.value == sessionId) {
@@ -1544,8 +1787,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _imageCache.value = emptyMap()
             _queueItems.value = queueBySession[sessionId] ?: emptyList()
             _jobs.value = jobsBySession[sessionId] ?: emptyList()
-            _streaming.value = ""
-            _streamingReasoning.value = ""
+            resetStreaming()
             _hasMore.value = false
             _loadingOlder.value = false
             _oldestSeq = null
@@ -1929,6 +2171,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             when (item) {
                 is ChatItem.User -> Strings.str("you_prefix", item.text)
                 is ChatItem.Assistant -> item.text
+                is ChatItem.Error -> "[${Strings.str("model_failed")}] ${item.message}"
                 else -> ""
             }
         }.trim()
@@ -1957,8 +2200,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _chatItems.value = emptyList()
         _events.value = emptyList()
         _imageCache.value = emptyMap()
-        _streaming.value = ""
-        _streamingReasoning.value = ""
+        resetStreaming()
         _draft.value = ""
         _fullTimelineSpans.value = emptyList()
         fullTimelineSessionId = null
@@ -1975,8 +2217,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _currentSessionId.value = null
                     _chatItems.value = emptyList()
                     _events.value = emptyList()
-                    _streaming.value = ""
-                    _streamingReasoning.value = ""
+                    resetStreaming()
                     _draft.value = ""
                     draftBySession.remove(sessionId)
                 }
@@ -2084,6 +2325,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     /** Called when the app returns to the foreground: force-fresh streams + catch up. */
+    /**
+     * 主动补拉会话列表。
+     *
+     * 用在"WebSocket 刚恢复"和"用户切回前台"两处:后台期间新增的会话不会补发
+     * 事件,只能靠这一下拉齐。失败静默 —— 下次事件/切前台还会再来。
+     */
+    fun pullSessionsNow() {
+        refreshSessions()
+    }
     fun onAppResumed() {
         // Re-establish the WebSocket streams; a backgrounded app can hold a half-open
         // socket that never errors, so retryWhen never re-subscribes on its own.
@@ -2122,11 +2372,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (fresh.isNotEmpty()) {
                         val folded = foldChat(fresh)
                         _events.value = (_events.value + compactEvents(fresh)).takeLast(MAX_EVENTS)
-                        _chatItems.value = _chatItems.value + folded
+                        appendChat(*folded.toTypedArray())
                         loadImagesFor(folded, sessionId)
                         lastSeqBySession[sessionId] = fresh.last().seq
-                        _streaming.value = ""
-                        _streamingReasoning.value = ""
+                        resetStreaming()
                     }
                 }
             } catch (_: Exception) {}
@@ -2143,6 +2392,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private var sessionsRefreshJob: Job? = null
+    /** refreshAll 的串行保护,避免并发拉取会话列表。 */
+    private var refreshAllJob: Job? = null
     /** Guards the resume refresh against activity-recreate churn. */
     private var lastResumeRefreshAt = 0L
     /**
@@ -2200,8 +2451,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _subagentChildrenByParent.value = map
         }
     }
+    /**
+     * 刷新工作区 + 会话列表。
+     *
+     * 加了串行保护:会话增删、工作区变化、切前台、事件重连都会调它,而这些
+     * 触发源经常同时到来。没有保护时几次 250KB 的 session.list 会并发排队,
+     * 手机网络下一卡就是好几秒。
+     */
     private fun refreshAll() {
-        viewModelScope.launch {
+        if (refreshAllJob?.isActive == true) return
+        refreshAllJob = viewModelScope.launch {
             try {
                 val ws = api?.workspaceList()
                 if (ws != null) {
@@ -2277,6 +2536,128 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Stream a file download to a local destination file. */
     suspend fun downloadFileTo(path: String, out: java.io.File): java.io.File {
         return withContext(Dispatchers.Default) { api?.downloadFileTo(path, out) ?: out }
+    }
+    /**
+     * 从 content URI 取显示名。
+     *
+     * 有些 provider(尤其网盘、微信、QQ 的分享 URI)只给 `_display_name` 之外
+     * 的列,取不到就返回 null,由调用方兜底 —— 绝不能让"取不到名字"变成上传失败。
+     */
+    private fun attachmentNameOf(ctx: android.content.Context, uri: android.net.Uri): String? {
+        if (uri.scheme == "file") return uri.lastPathSegment
+        return try {
+            ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && c.moveToFirst()) c.getString(idx)?.takeIf { it.isNotBlank() } else null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+    // ══ 会话附件(文档 / 表格 / 演示 / 图片)══════════════════════════
+
+    /** 正在上传的附件名 → 进度(0..1),给输入条上的卡片用。 */
+    private val _uploading = MutableStateFlow<Map<String, Float>>(emptyMap())
+    val uploading: StateFlow<Map<String, Float>> = _uploading.asStateFlow()
+
+    /** 已上传、等待随下一条消息发出的附件。 */
+    private val _attachments = MutableStateFlow<List<dev.dsh.remote.data.UploadedAttachment>>(emptyList())
+    val attachments: StateFlow<List<dev.dsh.remote.data.UploadedAttachment>> = _attachments.asStateFlow()
+
+    fun removeAttachment(name: String) {
+        _attachments.value = _attachments.value.filterNot { it.name == name }
+    }
+
+    fun clearAttachments() {
+        _attachments.value = emptyList()
+    }
+
+    /**
+     * 把一个本地 URI 上传成会话附件。
+     *
+     * 走宿主的流式上传路由 `/api/session/uploadFileBinary`(原始字节 +
+     * `application/octet-stream`,见 DshApi.uploadAttachment)。上传成功后把
+     * 返回的 [UploadedAttachment](含 `receiptId`)留在 [attachments] 里,
+     * 发送时以 `type:"file"` 内容块提交给模型。
+     */
+    fun uploadAttachment(uri: android.net.Uri) {
+        val ctx = getApplication<Application>()
+        val sessionId = currentSessionId.value
+        if (sessionId == null) {
+            toast("先打开一个会话再添加附件")
+            return
+        }
+        viewModelScope.launch {
+            val name = attachmentNameOf(ctx, uri) ?: "attachment-${System.currentTimeMillis()}"
+            _uploading.value = _uploading.value + (name to 0f)
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                }
+                if (bytes == null || bytes.isEmpty()) {
+                    toast(Strings.str("cannot_read_file"))
+                    return@launch
+                }
+                val mime = withContext(Dispatchers.IO) { ctx.contentResolver.getType(uri) }
+                val api = api ?: run {
+                    toast("还没连上宿主")
+                    return@launch
+                }
+                val uploaded = withContext(Dispatchers.IO) {
+                    api.uploadAttachment(sessionId, name, bytes, mime) { p ->
+                        _uploading.value = _uploading.value + (name to p)
+                    }
+                }
+                _attachments.value = _attachments.value + uploaded
+                toast("已添加:${uploaded.name}")
+            } catch (e: Exception) {
+                toast(Strings.str("upload_failed_fmt", e.message ?: ""))
+            } finally {
+                _uploading.value = _uploading.value - name
+            }
+        }
+    }
+
+    /**
+     * 发送消息,并把已上传的附件以 `@相对路径` 拼在正文后面。
+     *
+     * 拼在正文而不是另起字段:宿主的提示词约定就是用 `@path` 引用工作区文件,
+     * 模型据此调 `read_document`。发送成功后清空附件列表。
+     */
+    /**
+     * 发送消息,并把已上传的附件以 `{ type:"file", receiptId }` 内容块发给模型。
+     *
+     * 附件必须先经 [uploadAttachment] 上传成宿主暂存收据(`receiptId`),这里把
+     * 收据作为 content part 提交,宿主才会把文件绑定到这次提示词上。
+     */
+    fun sendWithAttachments(sessionId: String, text: String) {
+        val pending = _attachments.value
+        val textTrim = text.trim()
+        if (pending.isEmpty()) {
+            if (textTrim.isEmpty()) return
+            sendInternal(sessionId, textTrim)
+            return
+        }
+        if (textTrim.isEmpty() && pending.isEmpty()) return
+        val receiptIds = pending.mapNotNull { it.receiptId.takeIf(String::isNotBlank) }
+        _draft.value = ""
+        draftBySession.remove(sessionId)
+        persistDrafts()
+        startRunNow()
+        runningBySession[sessionId] = true
+        viewModelScope.launch {
+            try {
+                if (receiptIds.isNotEmpty()) {
+                    api?.sessionPromptFiles(sessionId, receiptIds, textTrim)
+                } else {
+                    api?.sessionPrompt(sessionId, textTrim)
+                }
+            } catch (e: Exception) {
+                _error.value = e.message
+                toast(attachmentErrorMessage(e))
+            }
+        }
+        clearAttachments()
     }
     /** Upload a local file (base64) into the given workspace directory, then refresh. */
     fun uploadFile(dir: String, name: String, base64: String, onDone: (String?) -> Unit = {}) {
@@ -2461,6 +2842,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try { api?.workspaceDelete(workspaceId); refreshAll() } catch (e: Exception) { _error.value = e.message }
         }
     }
+    /** 手机操控页需要的应用上下文与作用域（页面自己持有 PhoneSession）。 */
+    fun appContext(): android.content.Context = getApplication()
+
+    /** 供页面级协程使用；ViewModel 被清理时会一起取消。 */
+    val scope: kotlinx.coroutines.CoroutineScope get() = viewModelScope
+
     override fun onCleared() {
         // Flush any pending debounced draft write before the ViewModel is destroyed.
         val snapshot = draftBySession.toMap()

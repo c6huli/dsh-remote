@@ -15,13 +15,13 @@ android {
         applicationId = "dev.dsh.remote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 182
-        versionName = "1.5.103-ts"
+        versionCode = 213
+        versionName = "1.6.25"
     }
 
     // Signing is read from `keystore.properties` (git-ignored) so the private
     // key and passwords never end up in the repository. Copy
-    // `keystore.properties.example` �?`keystore.properties` and fill it in.
+    // `keystore.properties.example` -> `keystore.properties` and fill it in.
     val keystoreProperties = Properties()
     val keystorePropertiesFile = rootProject.file("keystore.properties")
     if (keystorePropertiesFile.exists()) {
@@ -76,6 +76,11 @@ dependencies {
     // Tiny embedded HTTP server: serves the cached Web bundle locally and proxies
     // the API, so the WebView loads from the phone instead of the tailnet.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // 手机操控：Shizuku 提供 shell 权限的 Binder 通道（设置里开启，未安装/未授权时
+    // 全部功能保持不可用，不影响其它页面）。MIT。
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.ui:ui-tooling-preview")
 }

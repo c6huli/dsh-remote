@@ -4,8 +4,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
@@ -14,10 +12,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
 /**
- * DeepSeek Harness design tokens (sourced from dsh-client-ui-theme
- * design-platform.css). Values are split into light / dark; the bare
- * DshXxx accessors below resolve through [LocalDshColors] so every existing
- * `color = DshAmber` style call stays theme-aware automatically.
+ * DeepSeek Harness 语义色(会话内容用到的业务语义,与 dsh-client-ui-theme 对齐)。
+ *
+ * 与 [DshSemanticColors] 的区别:这里是**会话内容**的语义(输入/模型/工具 lane、
+ * 上下文占比),那边是**界面状态**的语义(成功/警告/错误/代码井)。
  */
 @Immutable
 data class DshColors(
@@ -37,91 +35,104 @@ data class DshColors(
 )
 
 val DshDarkColors = DshColors(
-    primary = Color(0xFF679EFE),        // state-business-primary (deepseek-400)
-    success = Color(0xFF22C55E),        // state-success-primary (green-500)
-    warn = Color(0xFFF59E0B),           // state-warn-primary (amber-500)
-    danger = Color(0xFFF25A5A),         // state-error-primary (red-400)
-    userText = Color(0xFF93C5FD),       // blue-300
-    bubble = Color(0xFF2C2C2E),         // neutral-bluish-850
-    bubbleHighlight = Color(0xFF43454A),// neutral-bluish-750
+    primary = Color(0xFF679EFE),
+    success = Color(0xFF22C55E),
+    warn = Color(0xFFF59E0B),
+    danger = Color(0xFFF25A5A),
+    userText = Color(0xFF93C5FD),
+    bubble = Color(0xFF2C2C2E),
+    bubbleHighlight = Color(0xFF43454A),
     laneInput = Color(0xFF679EFE),
     laneModel = Color(0xFF9474BC),
     laneTool = Color(0xFFDD8629),
-    contextSystem = Color(0xFFADB2B8),  // neutral-bluish-400
+    contextSystem = Color(0xFFADB2B8),
     contextTools = Color(0xFFA78BFA),
-    contextMessages = Color(0xFF5686FE),// blue-450
+    contextMessages = Color(0xFF5686FE),
 )
 
 val DshLightColors = DshColors(
-    primary = Color(0xFF4176E6),        // state-business-primary (deepseek-500)
+    primary = Color(0xFF4176E6),
     success = Color(0xFF22C55E),
     warn = Color(0xFFF59E0B),
-    danger = Color(0xFFEC1313),         // state-error-primary (red-600)
-    userText = Color(0xFF2563EB),       // blue-600
-    bubble = Color(0xFFEDF3FE),         // deepseek-50
-    bubbleHighlight = Color(0xFFD3E2FF),// deepseek-200
+    danger = Color(0xFFEC1313),
+    userText = Color(0xFF2563EB),
+    bubble = Color(0xFFEDF3FE),
+    bubbleHighlight = Color(0xFFD3E2FF),
     laneInput = Color(0xFF4176E6),
     laneModel = Color(0xFF7C5CD6),
     laneTool = Color(0xFFDD8629),
-    contextSystem = Color(0xFF81858C),  // neutral-bluish-600
+    contextSystem = Color(0xFF81858C),
     contextTools = Color(0xFFA78BFA),
     contextMessages = Color(0xFF5686FE),
 )
 
 val LocalDshColors = staticCompositionLocalOf { DshDarkColors }
 
-private val DarkScheme = darkColorScheme(
-    primary = DshDarkColors.primary,
-    background = Color(0xFF151517),     // neutral-bluish-950 (bg-base)
-    surface = Color(0xFF232324),        // neutral-bluish-875 (layer-1)
-    surfaceVariant = Color(0xFF353638), // neutral-bluish-800 (module platform)
-    onPrimary = Color(0xFF0F1115),
-    onBackground = Color(0xFFF9FAFB),   // label-primary
-    onSurface = Color(0xFFF9FAFB),
-    onSurfaceVariant = Color(0xFFCFD3D6),// label-secondary
-    outline = Color(0xFF353638),
-    error = DshDarkColors.danger,
-    secondary = DshDarkColors.success,
-    tertiary = DshDarkColors.warn,
-)
-
-private val LightScheme = lightColorScheme(
-    primary = DshLightColors.primary,
-    background = Color(0xFFFFFFFF),     // neutral-bluish-00 (bg-base)
-    surface = Color(0xFFFFFFFF),        // layer-1
-    surfaceVariant = Color(0xFFF5F6F7), // neutral-bluish-60 (module platform)
-    onPrimary = Color(0xFFFFFFFF),
-    onBackground = Color(0xFF0F1115),   // label-primary
-    onSurface = Color(0xFF0F1115),
-    onSurfaceVariant = Color(0xFF61666B),// label-secondary
-    outline = Color(0xFFE1E5EE),        // neutral-bluish-200
-    error = DshLightColors.danger,
-    secondary = DshLightColors.success,
-    tertiary = DshLightColors.warn,
-)
-
+/**
+ * 应用主题。
+ *
+ * [accentId] 选配色(mist / daiqing / dusk / turquoise / amber / graphite),
+ * [accentOverride] 给自定义色用;[glassBlur] 是"允许透明玻璃"总开关。
+ *
+ * 三条铁律:
+ *
+ * 1. **层次靠材质,不靠阴影。** 页面是渐变,浮在内容上的是玻璃,躺在页面上的
+ *    是半透明白;elevation 一律 0,surfaceTint 透明。唯一的投影在玻璃外沿且很淡。
+ * 2. **细线是骨架。** 卡片、Chip、输入框、对话框都有 0.5–1dp 的线;它比阴影
+ *    安静,在浅色雾蓝底上又比纯色块清楚。
+ * 3. **连续圆角。** 全部走 [AppShape] 的五档 + 胶囊,不手写半径。
+ */
 @Composable
-fun DshTheme(preference: String = "system", content: @Composable () -> Unit) {
+fun DshTheme(
+    preference: String = "system",
+    accentId: String = AppAccent.mist.id,
+    accentOverride: Color? = null,
+    glassBlur: Boolean = true,
+    content: @Composable () -> Unit,
+) {
     val dark = when (preference) {
         "dark" -> true
         "light" -> false
         else -> isSystemInDarkTheme()
     }
-    val colors = if (dark) DshDarkColors else DshLightColors
-    CompositionLocalProvider(LocalDshColors provides colors) {
+    val accent = if (accentOverride != null) AppAccent.derive(accentOverride) else AppAccent.preset(accentId)
+    val surfaces = if (dark) DshSurfaces.dark(accent, glassBlur) else DshSurfaces.light(accent, glassBlur)
+    val semantic = DshSemanticColors.forAccent(dark, accent)
+    val scheme = dshColorScheme(accent, dark)
+    val legacy = if (dark) DshDarkColors else DshLightColors
+
+    CompositionLocalProvider(
+        LocalDshColors provides legacy,
+        LocalDshSurfaces provides surfaces,
+        LocalDshSemantic provides semantic,
+        LocalAppAccent provides accent,
+    ) {
         MaterialTheme(
-            colorScheme = if (dark) DarkScheme else LightScheme,
+            colorScheme = scheme,
+            typography = AppType.textTheme,
+            shapes = dshShapes(),
         ) {
-            // Fill the whole window with the theme background so every screen
-            // (settings, balance, subagents, …) follows light/dark correctly.
-            Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                content()
+            // 背景由 AppBackdrop 画(渐变 + 两团光),Surface 只负责让内容有个
+            // 透明的承载层 —— 不透明底色会把渐变盖掉。
+            Surface(modifier = Modifier.fillMaxSize(), color = Color.Transparent) {
+                AppBackdrop(surfaces = surfaces) {
+                    content()
+                }
             }
         }
     }
 }
 
-// ---- theme-aware accessors (legacy names kept for call-site compatibility) ----
+/** Material 形状:五档连续圆角。 */
+fun dshShapes() = androidx.compose.material3.Shapes(
+    extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(AppShape.xs),
+    small = androidx.compose.foundation.shape.RoundedCornerShape(AppShape.sm),
+    medium = androidx.compose.foundation.shape.RoundedCornerShape(AppShape.md),
+    large = androidx.compose.foundation.shape.RoundedCornerShape(AppShape.lg),
+    extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(AppShape.xl),
+)
+
+// ---- 主题感知取色(旧名字保留,调用点不用改)----
 val DshGreen: Color
     @Composable get() = LocalDshColors.current.success
 val DshAmber: Color
